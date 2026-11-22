@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::camera::{self, CameraDevice, CameraMode, CameraPreview, CameraSelection};
+use takeseam::i18n::{Locale, key};
 use takeseam::microphone::{InputDevice, InputMeter, input_devices};
 
 use super::editor::recording_ffmpeg_path;
@@ -68,14 +69,22 @@ impl DeviceSettings {
         }
         self.poll(ui.ctx());
         let colors = ui_theme::palette(ui.ctx());
+        let locale = Locale::from_context(ui.ctx());
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         ui.spacing_mut().interact_size.y = 28.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("设备设置").size(13.0).strong());
+            ui.label(
+                RichText::new(locale.text(key::DEVICE_TITLE))
+                    .size(13.0)
+                    .strong(),
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .add_enabled(!busy && self.scan.is_none(), egui::Button::new("刷新设备"))
+                    .add_enabled(
+                        !busy && self.scan.is_none(),
+                        egui::Button::new(locale.text(key::DEVICE_REFRESH)),
+                    )
                     .clicked()
                 {
                     self.refresh(ui.ctx());
@@ -84,13 +93,13 @@ impl DeviceSettings {
         });
         if busy {
             ui.label(
-                RichText::new("录制中 · 设备已锁定")
+                RichText::new(locale.text(key::DEVICE_LOCKED))
                     .size(11.0)
                     .color(colors.muted),
             );
         } else if self.scan.is_some() {
             ui.label(
-                RichText::new("正在读取设备…")
+                RichText::new(locale.text(key::DEVICE_READING))
                     .size(11.0)
                     .color(colors.muted),
             );
@@ -210,27 +219,37 @@ impl DeviceSettings {
     }
 
     fn show_microphone(&mut self, ui: &mut egui::Ui, enabled: &mut bool) {
+        let locale = Locale::from_context(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("麦克风").size(12.0).strong());
+            ui.label(
+                RichText::new(locale.text(key::DEVICE_MICROPHONE))
+                    .size(12.0)
+                    .strong(),
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.checkbox(enabled, "录制麦克风");
+                ui.checkbox(enabled, locale.text(key::DEVICE_RECORD_MICROPHONE));
             });
         });
         let mut choice = self.microphone.clone();
-        let name = self.microphone.as_deref().map_or("系统默认", |id| {
-            self.microphones
-                .iter()
-                .find(|device| device.id == id)
-                .map_or("已断开", |device| device.name.as_str())
-        });
+        let name =
+            self.microphone
+                .as_deref()
+                .map_or(locale.text(key::DEVICE_SYSTEM_DEFAULT), |id| {
+                    self.microphones
+                        .iter()
+                        .find(|device| device.id == id)
+                        .map_or(locale.text(key::DEVICE_DISCONNECTED), |device| {
+                            device.name.as_str()
+                        })
+                });
         ui.horizontal(|ui| {
-            let label = ui.label("输入设备");
+            let label = ui.label(locale.text(key::DEVICE_INPUT));
             egui::ComboBox::from_id_salt("recording-microphone")
                 .width(ui.available_width().max(1.0))
                 .truncate()
                 .selected_text(name)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut choice, None, "系统默认");
+                    ui.selectable_value(&mut choice, None, locale.text(key::DEVICE_SYSTEM_DEFAULT));
                     for device in &self.microphones {
                         ui.selectable_value(&mut choice, Some(device.id.clone()), &device.name);
                     }
@@ -247,9 +266,9 @@ impl DeviceSettings {
 
         ui.horizontal(|ui| {
             let label = if self.meter.is_some() {
-                "停止测试"
+                locale.text(key::DEVICE_TEST_STOP)
             } else {
-                "测试麦克风"
+                locale.text(key::DEVICE_TEST_MICROPHONE)
             };
             if ui.button(label).clicked() {
                 if self.meter.take().is_none() {
@@ -271,7 +290,10 @@ impl DeviceSettings {
                         ui.add(
                             egui::ProgressBar::new(self.meter_level)
                                 .desired_width(ui.available_width())
-                                .text(format!("输入电平 {:.0}%", self.meter_level * 100.0)),
+                                .text(locale.format(
+                                    key::DEVICE_INPUT_LEVEL,
+                                    &[("value", &format!("{:.0}", self.meter_level * 100.0))],
+                                )),
                         );
                     }
                     Err(error) => {
@@ -288,18 +310,26 @@ impl DeviceSettings {
         {
             ui.colored_label(ui_theme::palette(ui.ctx()).danger, error);
         } else if self.scanned && self.scan.is_none() && self.microphones.is_empty() {
-            ui.label(RichText::new("未找到麦克风输入").size(11.0));
+            ui.label(RichText::new(locale.text(key::DEVICE_NO_MICROPHONE)).size(11.0));
         }
     }
 
     fn show_camera(&mut self, ui: &mut egui::Ui) {
+        let locale = Locale::from_context(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("摄像头").size(12.0).strong());
+            ui.label(
+                RichText::new(locale.text(key::DEVICE_CAMERA))
+                    .size(12.0)
+                    .strong(),
+            );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let ready = self.selected_camera().is_some() || self.record_camera;
                 ui.add_enabled(
                     ready,
-                    egui::Checkbox::new(&mut self.record_camera, "录制摄像头"),
+                    egui::Checkbox::new(
+                        &mut self.record_camera,
+                        locale.text(key::DEVICE_RECORD_CAMERA),
+                    ),
                 );
             });
         });
@@ -307,9 +337,11 @@ impl DeviceSettings {
         let device_label = self
             .camera
             .as_ref()
-            .map_or("未检测到摄像头", |camera| camera.name.as_str());
+            .map_or(locale.text(key::DEVICE_NO_CAMERA), |camera| {
+                camera.name.as_str()
+            });
         ui.horizontal(|ui| {
-            let label = ui.label("设备");
+            let label = ui.label(locale.text(key::DEVICE_INPUT));
             egui::ComboBox::from_id_salt("recording-camera")
                 .width(ui.available_width().max(1.0))
                 .truncate()
@@ -334,14 +366,15 @@ impl DeviceSettings {
 
         let mut mode = self.mode.clone();
         let mode_label = if self.mode_scan.is_some() {
-            "正在检测画质…".to_owned()
+            locale.text(key::DEVICE_DETECTING_QUALITY).to_owned()
         } else {
-            self.mode
-                .as_ref()
-                .map_or_else(|| "无可用画质".to_owned(), CameraMode::label)
+            self.mode.as_ref().map_or_else(
+                || locale.text(key::DEVICE_NO_QUALITY).to_owned(),
+                CameraMode::label,
+            )
         };
         ui.horizontal(|ui| {
-            let label = ui.label("画质");
+            let label = ui.label(locale.text(key::DEVICE_QUALITY));
             egui::ComboBox::from_id_salt("recording-camera-mode")
                 .width(ui.available_width().max(1.0))
                 .truncate()
@@ -366,9 +399,9 @@ impl DeviceSettings {
 
         let previewing = self.camera_preview.is_some();
         let preview_label = if previewing {
-            "关闭摄像头预览"
+            locale.text(key::DEVICE_CLOSE_CAMERA)
         } else {
-            "打开摄像头预览"
+            locale.text(key::DEVICE_OPEN_CAMERA)
         };
         if ui
             .add_enabled(
@@ -424,6 +457,7 @@ impl DeviceSettings {
     }
 
     fn paint_camera_preview(&mut self, ui: &mut egui::Ui) {
+        let locale = Locale::from_context(ui.ctx());
         let Some(preview) = &mut self.camera_preview else {
             return;
         };
@@ -460,7 +494,7 @@ impl DeviceSettings {
                     .alt_text("摄像头画面"),
             );
         } else {
-            ui.label(RichText::new("正在打开摄像头…").size(11.0));
+            ui.label(RichText::new(locale.text(key::DEVICE_OPENING_CAMERA)).size(11.0));
         }
     }
 }
@@ -491,6 +525,7 @@ mod tests {
     #[test]
     fn device_panel_shows_controls_with_no_hardware_and_blocks_invalid_camera_selection() {
         let ctx = egui::Context::default();
+        Locale::set_context(&ctx, takeseam::i18n::Language::ZhCn);
         ctx.enable_accesskit();
         let mut settings = DeviceSettings {
             scanned: true,

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -19,10 +18,8 @@ use super::canvas_format::CanvasFormat;
 use super::media::background;
 use super::media::overlays::{Overlays, SCRIPT_NAME, VIDEO_FPS, sequence_size};
 use super::media::{
-    MediaInfo, MediaTools, append_clip_volume_filter, local_media, sequence_filter,
+    MediaInfo, MediaTools, append_clip_volume_filter, hidden_command, local_media, sequence_filter,
 };
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Default)]
 pub(super) struct ExportJob {
@@ -490,13 +487,18 @@ fn audio_mix(command: &mut Command, segment: &Segment<'_>, duration: &str) -> Re
 }
 
 fn encoder(tools: &MediaTools) -> Result<&'static str> {
-    let result = Command::new(&tools.ffmpeg)
+    let result = hidden_command(&tools.ffmpeg)
         .args(["-hide_banner", "-encoders"])
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .context("无法读取 MP4 编码器")?;
     let names = String::from_utf8_lossy(&result.stdout);
-    for name in ["libx264", "h264_mf"] {
+    for name in [
+        "libx264",
+        #[cfg(windows)]
+        "h264_mf",
+        #[cfg(target_os = "macos")]
+        "h264_videotoolbox",
+    ] {
         if names
             .lines()
             .any(|line| line.split_whitespace().nth(1) == Some(name))
@@ -508,11 +510,9 @@ fn encoder(tools: &MediaTools) -> Result<&'static str> {
 }
 
 fn command(tools: &MediaTools) -> Command {
-    let mut ffmpeg = Command::new(&tools.ffmpeg);
+    let mut ffmpeg = hidden_command(&tools.ffmpeg);
     ffmpeg
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null())
         .stdout(Stdio::null());
     ffmpeg
 }
@@ -1174,7 +1174,7 @@ mod tests {
 
     fn assert_frames(tools: &MediaTools, output: &Path, frames: &[(&str, [u8; 3])]) {
         for &(position, color) in frames {
-            let frame = Command::new(&tools.ffmpeg)
+            let frame = hidden_command(&tools.ffmpeg)
                 .args(["-hide_banner", "-loglevel", "error", "-ss", position, "-i"])
                 .arg(output)
                 .args([
@@ -1188,7 +1188,6 @@ mod tests {
                     "rawvideo",
                     "pipe:1",
                 ])
-                .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .unwrap();
             assert!(frame.status.success());
@@ -1205,13 +1204,12 @@ mod tests {
     }
 
     fn audio_samples(tools: &MediaTools, output: &Path, position: &str) -> Vec<f32> {
-        let decoded = Command::new(&tools.ffmpeg)
+        let decoded = hidden_command(&tools.ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-ss", position, "-i"])
             .arg(output)
             .args([
                 "-t", "0.2", "-map", "0:a:0", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1",
             ])
-            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .unwrap();
         assert!(decoded.status.success());

@@ -1,4 +1,7 @@
 use std::io::{BufReader, Read, Seek};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
@@ -23,6 +26,7 @@ pub(super) mod overlays;
 use audio::AudioDecode;
 use overlays::{DEFAULT_CANVAS, Overlays, SCRIPT_NAME, VIDEO_FPS};
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PREVIEW_TICK: Duration = Duration::from_millis(15);
 const USECS_PER_SEC: u64 = 1_000_000;
@@ -49,15 +53,16 @@ impl MediaTools {
     pub fn discover() -> Result<Self> {
         Ok(Self {
             ffmpeg: Self::ffmpeg_path()?,
-            ffprobe: Self::find_program("ffprobe.exe", "FFprobe")?,
+            ffprobe: Self::find_program("ffprobe", "FFprobe")?,
         })
     }
 
     pub(super) fn ffmpeg_path() -> Result<PathBuf> {
-        Self::find_program("ffmpeg.exe", "FFmpeg")
+        Self::find_program("ffmpeg", "FFmpeg")
     }
 
     fn find_program(program: &str, label: &str) -> Result<PathBuf> {
+        let program = format!("{program}{}", std::env::consts::EXE_SUFFIX);
         let executable =
             std::env::current_exe().with_context(|| format!("无法确定 {PRODUCT_NAME} 程序位置"))?;
         let folder = executable
@@ -70,13 +75,20 @@ impl MediaTools {
                 .take(3)
                 .map(|base| base.join("tools/ffmpeg/bin")),
         );
+        #[cfg(target_os = "macos")]
+        if let Some(contents) = folder.parent() {
+            search.push(contents.join("Resources/ffmpeg/bin"));
+        }
         if let Some(path) = std::env::var_os("PATH") {
             search.extend(std::env::split_paths(&path).filter(|folder| folder.is_absolute()));
         }
+        // Finder-launched applications may not inherit the user's shell PATH.
+        #[cfg(target_os = "macos")]
+        search.extend(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from));
         search
             .iter()
-            .map(|folder| folder.join(program))
-            .find(|p| p.is_file())
+            .map(|folder| folder.join(&program))
+            .find(|path| is_executable(path))
             .with_context(|| {
                 format!("找不到 {label}。请将 {program} 放入 {PRODUCT_NAME} 程序目录或 PATH")
             })
@@ -141,6 +153,17 @@ impl MediaTools {
     ) -> Result<egui::ColorImage> {
         thumbnail(&self.ffmpeg, path, timestamp_us, FILMSTRIP_SIZE, stopped)
     }
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return false;
+    }
+    metadata.is_file()
 }
 
 fn video_dimensions(video: &Value) -> Result<(u32, u32)> {
@@ -363,11 +386,11 @@ pub(super) fn local_media(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn hidden_command(path: &Path) -> Command {
+pub(super) fn hidden_command(path: &Path) -> Command {
     let mut command = Command::new(path);
-    command
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.stdin(Stdio::null());
     command
 }
 

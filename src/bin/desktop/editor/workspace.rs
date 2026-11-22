@@ -5,7 +5,6 @@ use eframe::egui::{self, RichText};
 use takeseam::PRODUCT_NAME;
 use takeseam::editor_timeline::{PRIMARY_AUDIO, PRIMARY_VIDEO, Timeline, TrackId, TrackKind};
 
-use super::super::desktop::open;
 use super::asset_cards::{self, MaterialAction};
 use super::asset_info;
 use super::background::{BackgroundSettings, BackgroundSource};
@@ -26,10 +25,13 @@ use super::subtitle_canvas::SubtitleCanvas;
 use super::text_panel::TextInspector;
 use super::thumbnails::Thumbnails;
 use super::timeline_view::{TimelineView, TrackDestination};
+#[cfg(windows)]
 use super::window_frame;
 use super::{dock_presets, dock_view};
+use crate::open;
 use crate::ui_icons::{ButtonStyle, Icon, icon_button};
 use crate::ui_theme;
+use takeseam::i18n::{Language, Locale, key};
 
 #[cfg(test)]
 #[path = "workspace/drag_drop_tests.rs"]
@@ -527,6 +529,22 @@ impl Workspace {
         {
             self.show_notice(format!("无法保存外观设置（{error}）"), true);
         }
+        let locale = Locale::from_context(ui.ctx());
+        ui.menu_button(locale.text(key::LANGUAGE), |ui| {
+            for language in [Language::ZhCn, Language::EnUs] {
+                let selected = locale.language() == language;
+                let label = match language {
+                    Language::ZhCn => locale.text(key::LANGUAGE_ZH),
+                    Language::EnUs => locale.text(key::LANGUAGE_EN),
+                };
+                if ui.selectable_label(selected, label).clicked() {
+                    if let Err(error) = Locale::set_context_and_persist(ui.ctx(), language) {
+                        self.show_notice(format!("无法保存语言设置（{error}）"), true);
+                    }
+                    ui.close();
+                }
+            }
+        });
         dock_presets::show(ui, docking)
     }
 
@@ -889,6 +907,7 @@ impl Workspace {
 
 impl eframe::App for Workspace {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(windows)]
         window_frame::restore_clipboard_shortcut(ctx, raw_input);
         self.material_drag.process(ctx, raw_input);
     }

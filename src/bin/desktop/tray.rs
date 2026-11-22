@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn brand_logo_keeps_its_primary_color_and_transparent_corners_at_tray_size() {
-        let icon = eframe::icon_data::from_png_bytes(crate::desktop::LOGO).unwrap();
+        let icon = eframe::icon_data::from_png_bytes(crate::APP_LOGO).unwrap();
         let pixels = icon_pixels(&icon).unwrap();
         assert_eq!(pixels.bgra[3], 0);
         assert_eq!(pixels.bgra[(ICON_SIDE - 1) * 4 + 3], 0);

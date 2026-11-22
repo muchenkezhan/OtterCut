@@ -167,6 +167,36 @@ fn ass_color([r, g, b, a]: [u8; 4]) -> u32 {
     u32::from_be_bytes([255 - a, b, g, r])
 }
 
+fn subtitle_font() -> &'static str {
+    #[cfg(windows)]
+    return "Microsoft YaHei";
+    #[cfg(target_os = "macos")]
+    return "PingFang SC";
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::{Command, Stdio};
+        use std::sync::OnceLock;
+
+        // Repeated preview frames should not need a new fontconfig process.
+        static FONT: OnceLock<String> = OnceLock::new();
+        FONT.get_or_init(|| {
+            Command::new("fc-match")
+                .args(["-f", "%{family}", "sans-serif:lang=zh-cn"])
+                .stdin(Stdio::null())
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .and_then(|families| {
+                    let family = families.split(',').next()?.trim();
+                    (!family.is_empty() && !family.chars().any(char::is_control))
+                        .then(|| family.to_owned())
+                })
+                .unwrap_or_else(|| "Noto Sans CJK SC".into())
+        })
+    }
+}
+
 fn write_style(script: &mut String, x_margin: u64, appearance: TextAppearance) {
     let paint = appearance.paint();
     let primary = ass_color(paint.foreground);
@@ -177,9 +207,10 @@ fn write_style(script: &mut String, x_margin: u64, appearance: TextAppearance) {
         Some(background) => (4, ass_color(background), paint.background_padding()),
         None => (1, if paint.shadow > 0 { outline } else { 0 }, paint.shadow),
     };
+    let font = subtitle_font();
     let _ = writeln!(
         script,
-        "Style: {},Microsoft YaHei,48,&H{primary:08X},&H{primary:08X},&H{outline:08X},&H{back:08X},0,0,0,0,100,100,0,0,{border_style},{},{},2,{x_margin},{x_margin},56,1",
+        "Style: {},{font},48,&H{primary:08X},&H{primary:08X},&H{outline:08X},&H{back:08X},0,0,0,0,100,100,0,0,{border_style},{},{},2,{x_margin},{x_margin},56,1",
         style_name(appearance),
         paint.outline_width,
         shadow,

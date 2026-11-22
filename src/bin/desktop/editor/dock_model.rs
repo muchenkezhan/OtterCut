@@ -348,10 +348,7 @@ struct Preferences {
 }
 
 fn preference_path() -> Option<PathBuf> {
-    let directory = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
-    directory
-        .is_absolute()
-        .then(|| directory.join("TakeSeam").join("workspace.json"))
+    Some(takeseam::config_directory()?.join("workspace.json"))
 }
 
 #[cfg(test)]

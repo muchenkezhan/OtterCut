@@ -8,6 +8,7 @@ use takeseam::editor_timeline::TrackKind;
 
 use crate::ui_icons::Icon;
 use crate::ui_theme::{Palette, upper_palette};
+use takeseam::i18n::{Locale, key};
 
 use super::feature_panel::action_row;
 use super::layout;
@@ -186,10 +187,11 @@ fn show_grid(
     });
     let indices = audio_indices.as_deref();
     let card_count = indices.map_or(library.paths.len(), <[usize]>::len);
+    let locale = Locale::from_context(ui.ctx());
     let import_label = if audio_only {
-        "导入音频"
+        locale.text(key::IMPORT_AUDIO)
     } else {
-        "导入素材"
+        locale.text(key::IMPORT_MEDIA)
     };
     if card_count == 0 {
         let action = if !audio_only && action_row(ui, Icon::FolderPlus, import_label) {
@@ -291,20 +293,21 @@ fn material_menu(response: &egui::Response, path: &Path, can_add: bool) -> Optio
     egui::Popup::context_menu(response)
         .show(|ui| {
             layout::compact_menu(ui);
+            let locale = Locale::from_context(ui.ctx());
             let action = if ui
-                .add_enabled(can_add, egui::Button::new("添加到选中轨道"))
+                .add_enabled(can_add, egui::Button::new(locale.text(key::ADD_TO_TRACK)))
                 .clicked()
             {
                 MaterialAction::Add(path.to_owned())
-            } else if ui.button("查看素材信息").clicked() {
+            } else if ui.button(locale.text(key::VIEW_INFO)).clicked() {
                 MaterialAction::Inspect(path.to_owned())
-            } else if ui.button("打开所在文件夹").clicked() {
+            } else if ui.button(locale.text(key::OPEN_FOLDER)).clicked() {
                 MaterialAction::OpenFolder(path.to_owned())
-            } else if ui.button("复制文件路径").clicked() {
+            } else if ui.button(locale.text(key::COPY_PATH)).clicked() {
                 MaterialAction::CopyPath(path.to_owned())
             } else {
                 ui.separator();
-                if ui.button("移除素材").clicked() {
+                if ui.button(locale.text(key::REMOVE_ASSET)).clicked() {
                     MaterialAction::Remove(path.to_owned())
                 } else {
                     return None;

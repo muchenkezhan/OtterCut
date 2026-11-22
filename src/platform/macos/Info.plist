@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.muchenkezhan.ottercut.capture</string>
+    <key>CFBundleExecutable</key>
+    <string>ottercut-macos-capture</string>
+    <key>CFBundleName</key>
+    <string>OtterCut Capture</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>OtterCut 在开启麦克风的录制中捕获你的语音。</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>OtterCut 录制你在系统选择器中选定的屏幕或窗口。</string>
+</dict>
+</plist>

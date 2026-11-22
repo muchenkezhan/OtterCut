@@ -7,6 +7,7 @@ use eframe::egui::{
 
 use crate::ui_icons::{Icon, paint_icon_focus};
 use crate::ui_theme::upper_palette;
+use takeseam::i18n::{Locale, key};
 
 use super::dock_view::{MATERIALS_GRIP_WIDTH, MATERIALS_TAB_HEIGHT};
 
@@ -29,13 +30,13 @@ impl FeatureTab {
         Self::Background,
     ];
 
-    fn label(self) -> &'static str {
+    fn label(self, locale: Locale) -> &'static str {
         match self {
-            Self::Materials => "素材",
-            Self::Audio => "音频",
-            Self::Captions => "字幕",
-            Self::Text => "文本",
-            Self::Background => "动态",
+            Self::Materials => locale.text(key::MATERIALS),
+            Self::Audio => locale.text(key::AUDIO),
+            Self::Captions => locale.text(key::CAPTIONS),
+            Self::Text => locale.text(key::TEXT),
+            Self::Background => locale.text(key::BACKGROUND),
         }
     }
 
@@ -56,8 +57,10 @@ pub(super) fn tabs(ui: &mut egui::Ui, selected: &mut FeatureTab, narration_activ
         ((strip.width() - MATERIALS_GRIP_WIDTH) / FeatureTab::ALL.len() as f32).clamp(0.0, 64.0);
     let font = FontId::proportional(11.0);
     let painter = ui.painter();
-    let labels = FeatureTab::ALL
-        .map(|tab| painter.layout_no_wrap(tab.label().into(), font.clone(), Color32::PLACEHOLDER));
+    let locale = Locale::from_context(ui.ctx());
+    let labels = FeatureTab::ALL.map(|tab| {
+        painter.layout_no_wrap(tab.label(locale).into(), font.clone(), Color32::PLACEHOLDER)
+    });
     let show_labels = labels.iter().all(|label| label.size().x + 24.0 <= width);
     let icon_scale = (width / 18.0).clamp(0.55, 0.82);
     ui.horizontal(|ui| {
@@ -104,9 +107,9 @@ pub(super) fn tabs(ui: &mut egui::Ui, selected: &mut FeatureTab, narration_activ
             let active = tab == *selected;
             let busy = tab == FeatureTab::Audio && narration_active;
             let accessible_label = if busy {
-                "音频（正在处理旁白）"
+                locale.text(key::AUDIO)
             } else {
-                tab.label()
+                tab.label(locale)
             };
             response.widget_info(|| {
                 WidgetInfo::selected(WidgetType::SelectableLabel, true, active, accessible_label)
@@ -209,10 +212,22 @@ pub(super) fn narration_controls(
 ) -> Option<NarrationAction> {
     let colors = upper_palette(ui.ctx());
     let (label, action) = match narration {
-        NarrationView::Idle => ("录制旁白", Some(NarrationAction::Start)),
-        NarrationView::Starting => ("启动录音中…", None),
-        NarrationView::Recording(_) => ("停止录制", Some(NarrationAction::Stop)),
-        NarrationView::Saving => ("保存旁白中…", None),
+        NarrationView::Idle => (
+            Locale::from_context(ui.ctx()).text(key::NARRATION_START),
+            Some(NarrationAction::Start),
+        ),
+        NarrationView::Starting => (
+            Locale::from_context(ui.ctx()).text(key::NARRATION_STARTING),
+            None,
+        ),
+        NarrationView::Recording(_) => (
+            Locale::from_context(ui.ctx()).text(key::RECORD_STOP),
+            Some(NarrationAction::Stop),
+        ),
+        NarrationView::Saving => (
+            Locale::from_context(ui.ctx()).text(key::NARRATION_SAVING),
+            None,
+        ),
     };
 
     let busy = action.is_none();

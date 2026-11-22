@@ -1,19 +1,29 @@
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::{Child, Command};
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use anyhow::{Context as _, Result};
 use eframe::egui;
+#[cfg(windows)]
 use takeseam::PRODUCT_NAME;
+use takeseam::i18n::{Language, Locale, key};
+#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW,
     SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindowAsync, WM_CLOSE,
 };
+#[cfg(windows)]
 use windows::core::BOOL;
 
-use super::desktop::{LOGO, load_logo};
 use super::ui_theme;
+use crate::{APP_LOGO, load_logo};
 
 #[path = "editor/asset_cards.rs"]
 mod asset_cards;
@@ -67,20 +77,26 @@ mod thumbnails;
 mod timeline_view;
 #[path = "editor/waveforms.rs"]
 mod waveforms;
+#[cfg(windows)]
 #[path = "editor/window_chrome.rs"]
 mod window_chrome;
+#[cfg(windows)]
 #[path = "editor/window_frame.rs"]
 mod window_frame;
 #[path = "editor/workspace.rs"]
 mod workspace;
 
+#[cfg(windows)]
 const WINDOW_TITLE: &str = "OtterCut 编辑控制台";
 
-pub(super) fn recording_ffmpeg_path() -> Result<PathBuf> {
+#[cfg(windows)]
+pub(super) fn recording_ffmpeg_path() -> anyhow::Result<PathBuf> {
     media::MediaTools::ffmpeg_path()
 }
+#[cfg(windows)]
 const WINDOW_POLL_INTERVAL: Duration = Duration::from_millis(125);
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum EditorWindowState {
     #[default]
@@ -90,12 +106,14 @@ pub(super) enum EditorWindowState {
     Minimized,
 }
 
+#[cfg(windows)]
 #[derive(Default)]
 pub struct EditorWindow {
     child: Option<Child>,
     state: EditorWindowState,
 }
 
+#[cfg(windows)]
 impl EditorWindow {
     pub fn open(&mut self, ctx: &egui::Context, directory: &Path) -> Result<()> {
         let window = self.refresh()?;
@@ -210,6 +228,7 @@ impl EditorWindow {
     }
 }
 
+#[cfg(windows)]
 fn process_windows(process: u32) -> impl Iterator<Item = HWND> {
     struct Search {
         process: u32,
@@ -237,6 +256,7 @@ fn process_windows(process: u32) -> impl Iterator<Item = HWND> {
     search.windows.into_iter()
 }
 
+#[cfg(windows)]
 fn is_editor_window(handle: HWND) -> bool {
     let mut title = [0; 64];
     // SAFETY: The handle came from EnumWindows and title is a writable buffer.
@@ -248,12 +268,16 @@ fn is_editor_window(handle: HWND) -> bool {
 }
 
 pub fn launch(directory: PathBuf) -> eframe::Result {
-    let icon = eframe::icon_data::from_png_bytes(LOGO)
+    let icon = eframe::icon_data::from_png_bytes(APP_LOGO)
         .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    let language = takeseam::i18n::preference_path()
+        .and_then(|path| takeseam::i18n::read_preference(&path))
+        .unwrap_or_else(Language::detect);
+    let title = Locale::new(language).text(key::WINDOW_TITLE).to_owned();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(WINDOW_TITLE)
-            .with_decorations(false)
+            .with_title(&title)
+            .with_decorations(!cfg!(windows))
             .with_has_shadow(true)
             .with_inner_size([1240.0, 760.0])
             .with_min_inner_size([760.0, 490.0])
@@ -262,10 +286,12 @@ pub fn launch(directory: PathBuf) -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        WINDOW_TITLE,
+        &title,
         options,
         Box::new(|creation| {
+            #[cfg(windows)]
             window_frame::install(creation).map_err(anyhow::Error::into_boxed_dyn_error)?;
+            Locale::set_context(&creation.egui_ctx, language);
             ui_theme::initialize_editor(&creation.egui_ctx);
             Ok(Box::new(workspace::Workspace::new(
                 &creation.egui_ctx,

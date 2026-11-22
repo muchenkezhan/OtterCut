@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -40,14 +40,12 @@ pub(super) fn load(path: &Path) -> Result<(Timeline, u64, CanvasFormat, Backgrou
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let mut background = document.background.take().unwrap_or_default();
     ensure!(background.is_valid(), "工程背景设置无效");
-    if let BackgroundSource::Image(image) = &mut background.source
-        && image.is_relative()
-    {
-        *image = parent.join(&*image);
+    if let BackgroundSource::Image(image) = &mut background.source {
+        resolve_media_path(parent, image);
     }
     let resolve = |clip: &mut Clip| {
-        if clip.text.is_none() && clip.path.is_relative() {
-            clip.path = parent.join(&clip.path);
+        if clip.text.is_none() {
+            resolve_media_path(parent, &mut clip.path);
         }
     };
     let timeline = match document.version {
@@ -89,6 +87,19 @@ pub(super) fn save(
         .parent()
         .filter(|path| path.is_dir())
         .context("工程目录不可用")?;
+    let mut tracks = timeline.tracks().to_vec();
+    for clip in tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if clip.text.is_none() {
+            store_media_path(parent, &mut clip.path);
+        }
+    }
+    let backdrop = (*background != BackgroundSettings::default()).then(|| {
+        let mut settings = background.clone();
+        if let BackgroundSource::Image(image) = &mut settings.source {
+            store_media_path(parent, image);
+        }
+        settings
+    });
     let document = Document {
         version: if timeline
             .tracks()
@@ -101,9 +112,9 @@ pub(super) fn save(
         },
         playhead_us: playhead.min(timeline.duration()),
         clips: None,
-        tracks: Some(timeline.tracks().to_vec()),
+        tracks: Some(tracks),
         canvas: (!canvas.is_original()).then_some(canvas),
-        background: (*background != BackgroundSettings::default()).then(|| background.clone()),
+        background: backdrop,
     };
     let mut file = tempfile::NamedTempFile::new_in(parent).context("无法创建临时工程")?;
     {
@@ -138,6 +149,45 @@ pub(super) fn save(
         .map_err(|error| error.error)
         .context("无法保存剪辑工程")?;
     Ok(())
+}
+
+fn resolve_media_path(parent: &Path, path: &mut PathBuf) {
+    if path.has_root() {
+        return;
+    }
+    let resolved = parent.join(&*path);
+    #[cfg(not(windows))]
+    if let Some(name) = path.to_str()
+        && !resolved.is_file()
+    {
+        // Retain foreign drive/UNC references when reopening a project on another platform.
+        let bytes = name.as_bytes();
+        if name.starts_with('\\')
+            || (bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':'))
+        {
+            return;
+        }
+        // Older Windows projects used backslashes even for relative paths.
+        if name.contains('\\') {
+            *path = parent.join(name.replace('\\', "/"));
+            return;
+        }
+    }
+    *path = resolved;
+}
+
+fn store_media_path(parent: &Path, path: &mut PathBuf) {
+    if let Ok(relative) = path.strip_prefix(parent)
+        && !relative.as_os_str().is_empty()
+    {
+        *path = relative.to_owned();
+    }
+    #[cfg(windows)]
+    if path.is_relative()
+        && let Some(name) = path.to_str().filter(|name| name.contains('\\'))
+    {
+        *path = name.replace('\\', "/").into();
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +299,55 @@ mod tests {
             directory.path().join("legacy.mp4")
         );
         assert!(timeline.track(PRIMARY_AUDIO).unwrap().clips.is_empty());
+    }
+
+    #[test]
+    fn media_below_the_project_uses_portable_relative_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("portable.takeproj");
+        let mut timeline = Timeline::default();
+        let id = timeline
+            .append(directory.path().join("素材").join("video.mp4"), 1_000_000)
+            .unwrap();
+        let background = BackgroundSettings {
+            source: BackgroundSource::Image(directory.path().join("素材").join("background.png")),
+            ..BackgroundSettings::default()
+        };
+        save(&project, &timeline, 0, CanvasFormat::Original, &background).unwrap();
+
+        let document: Document = serde_json::from_reader(File::open(&project).unwrap()).unwrap();
+        let tracks = document.tracks.unwrap();
+        let clip = tracks.iter().flat_map(|track| &track.clips).next().unwrap();
+        assert_eq!(clip.path.to_str(), Some("素材/video.mp4"));
+        assert_eq!(
+            document.background.unwrap().source,
+            BackgroundSource::Image("素材/background.png".into())
+        );
+
+        let relocated = tempfile::tempdir().unwrap();
+        let copied = relocated.path().join("portable.takeproj");
+        fs::copy(&project, &copied).unwrap();
+        let (timeline, _, _, background) = load(&copied).unwrap();
+        assert_eq!(
+            timeline.clip(id).unwrap().path,
+            relocated.path().join("素材/video.mp4")
+        );
+        assert_eq!(
+            background.source,
+            BackgroundSource::Image(relocated.path().join("素材/background.png"))
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn resolves_legacy_windows_relative_media_without_rewriting_foreign_absolute_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut relative = PathBuf::from(r"素材\video.mp4");
+        resolve_media_path(directory.path(), &mut relative);
+        assert_eq!(relative, directory.path().join("素材/video.mp4"));
+        let mut foreign = PathBuf::from(r"C:\素材\video.mp4");
+        resolve_media_path(directory.path(), &mut foreign);
+        assert_eq!(foreign, PathBuf::from(r"C:\素材\video.mp4"));
     }
 
     #[test]

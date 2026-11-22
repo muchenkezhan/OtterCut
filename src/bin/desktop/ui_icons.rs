@@ -50,6 +50,8 @@ pub(crate) enum Icon {
     AddMedia,
     Media,
     Audio,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Microphone,
     Captions,
     Text,
     Timeline,
@@ -315,6 +317,22 @@ impl Icon {
                 rect((1.7, -5.5), (8.0, -1.5), 1_u8);
                 rect((-8.0, 1.0), (-3.3, 5.1), 1_u8);
                 rect((-2.2, 1.0), (8.0, 5.1), 1_u8);
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            Self::Microphone => {
+                rect((-2.7, -7.0), (2.7, 0.8), 3);
+                path(&[
+                    (-5.0, -1.0),
+                    (-5.0, 0.5),
+                    (-4.0, 2.5),
+                    (-2.0, 4.0),
+                    (2.0, 4.0),
+                    (4.0, 2.5),
+                    (5.0, 0.5),
+                    (5.0, -1.0),
+                ]);
+                line((0.0, 4.0), (0.0, 7.0));
+                line((-2.5, 7.0), (2.5, 7.0));
             }
             Self::Stop => {
                 painter.rect_filled(

@@ -5,10 +5,12 @@ use takeseam::PRODUCT_NAME;
 
 use crate::ui_icons::{ButtonStyle, Icon, icon_button, paint_icon_focus};
 use crate::ui_theme::{ON_ACCENT_FILL, Palette, palette, upper_palette};
+use takeseam::i18n::{Locale, key};
 
 use super::canvas_format::CanvasFormat;
 use super::media::PreviewQuality;
 use super::preview_viewport::PreviewViewport;
+#[cfg(windows)]
 use super::{window_chrome, window_frame};
 
 #[path = "layout/canvas_ratio.rs"]
@@ -68,8 +70,11 @@ pub(super) fn header(
                     .layout(Layout::right_to_left(Align::Center)),
             );
             action_ui.spacing_mut().item_spacing.x = 4.0;
-            window_chrome::controls(&mut action_ui);
-            action_ui.separator();
+            #[cfg(windows)]
+            {
+                window_chrome::controls(&mut action_ui);
+                action_ui.separator();
+            }
             actions(&mut action_ui);
 
             let mut brand = ui.new_child(
@@ -93,6 +98,7 @@ pub(super) fn header(
 
             let left_end = brand.min_rect().right();
             let right_start = action_ui.min_rect().left();
+            #[cfg(windows)]
             window_frame::set_caption(
                 Rect::from_x_y_ranges(left_end..=right_start.max(left_end), row.y_range()),
                 ui.ctx().pixels_per_point(),
@@ -122,9 +128,12 @@ pub(super) fn export_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response 
     ui.add_enabled_ui(enabled, |ui| {
         let colors = upper_palette(ui.ctx());
         let (bounds, response) = ui.allocate_exact_size(vec2(68.0, 28.0), Sense::click());
-        let label = "导出 MP4";
+        let label = Locale::from_context(ui.ctx())
+            .format(key::EXPORT, &[])
+            .to_string()
+            + " MP4";
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label)
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), label.as_str())
         });
         let (fill, ink) = if !response.enabled() {
             (colors.control, colors.muted)
@@ -143,7 +152,7 @@ pub(super) fn export_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response 
         painter.text(
             pos2(x + 12.0, bounds.center().y),
             Align2::LEFT_CENTER,
-            "导出",
+            Locale::from_context(ui.ctx()).text(key::EXPORT),
             FontId::proportional(12.0),
             ink,
         );
@@ -151,8 +160,8 @@ pub(super) fn export_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response 
             paint_icon_focus(painter, pos2(bounds.center().x, bounds.bottom() - 3.0), ink);
         }
         response
-            .on_hover_text(label)
-            .on_disabled_hover_text(label)
+            .on_hover_text(&label)
+            .on_disabled_hover_text(&label)
             .on_hover_cursor(egui::CursorIcon::PointingHand)
     })
     .inner
@@ -359,12 +368,10 @@ fn preview_seek(ui: &mut egui::Ui, position: u64, duration: u64, colors: Palette
                 .trailing_fill(enabled)
                 .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.26 }),
         );
+        let label = Locale::from_context(ui.ctx()).text(key::PREVIEW_PROGRESS);
         ui.ctx()
-            .accesskit_node_builder(response.id, |node| node.set_label("预览进度"));
-        response
-            .on_hover_text("预览进度")
-            .changed()
-            .then_some(value)
+            .accesskit_node_builder(response.id, |node| node.set_label(label));
+        response.on_hover_text(label).changed().then_some(value)
     })
     .inner
 }
@@ -395,9 +402,10 @@ fn preview_quality(
             }
         })
         .response;
+    let label = Locale::from_context(ui.ctx()).text(key::PREVIEW_QUALITY);
     ui.ctx()
-        .accesskit_node_builder(response.id, |node| node.set_label("预览质量"));
-    response.on_hover_text("预览质量");
+        .accesskit_node_builder(response.id, |node| node.set_label(label));
+    response.on_hover_text(label);
     (selected != quality).then_some(selected)
 }
 
@@ -483,10 +491,11 @@ fn transport_row(
             .max_rect(play)
             .layout(Layout::left_to_right(Align::Center)),
     );
+    let locale = Locale::from_context(ui.ctx());
     let (icon, label) = if playing {
-        (Icon::Pause, "暂停")
+        (Icon::Pause, locale.text(key::PAUSE))
     } else {
-        (Icon::Play, "播放")
+        (Icon::Play, locale.text(key::PLAY))
     };
     let toggle = icon_button(&mut play_ui, icon, label, duration > 0, ButtonStyle::Quiet).clicked();
     let seek_width = (seek_right - play.right() - CONTROL_GAP).clamp(0.0, 192.0);
@@ -509,7 +518,7 @@ fn transport_row(
     );
     let quality = preview_quality(&mut quality_ui, quality_width, quality);
     let zoom_label = if viewport.is_fitted() {
-        String::from("适应")
+        locale.text(key::FIT).to_owned()
     } else {
         format!("{}%", viewport.percent())
     };
@@ -643,6 +652,7 @@ mod tests {
     #[test]
     fn file_menu_and_window_controls_share_the_header_at_minimum_width() {
         let ctx = egui::Context::default();
+        takeseam::i18n::Locale::set_context(&ctx, takeseam::i18n::Language::ZhCn);
         ctx.enable_accesskit();
         let logo = ctx.load_texture(
             "header-test-logo",
@@ -671,8 +681,17 @@ mod tests {
         );
         let tree = output.platform_output.accesskit_update.unwrap();
         let mut previous_right = 0.0;
-        for label in ["文件", "工作区", "导出 MP4", "最小化", "最大化", "关闭窗口"]
-        {
+        for label in [
+            "文件",
+            "工作区",
+            "导出 MP4",
+            #[cfg(windows)]
+            "最小化",
+            #[cfg(windows)]
+            "最大化",
+            #[cfg(windows)]
+            "关闭窗口",
+        ] {
             let bounds = tree
                 .nodes
                 .iter()

@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn main() -> eframe::Result {
     let mut arguments = std::env::args_os().skip(1);
     if arguments.next().as_deref() == Some(std::ffi::OsStr::new("--editor")) {
@@ -10,19 +10,70 @@ fn main() -> eframe::Result {
             .unwrap_or_else(std::env::temp_dir);
         return editor::launch(directory);
     }
-    desktop::launch()
+    #[cfg(windows)]
+    return desktop::launch();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    return portable_recorder::launch();
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn main() {
-    eprintln!("{} 录制工作台需要 Windows。", takeseam::PRODUCT_NAME);
+    eprintln!(
+        "{} 支持 Windows、macOS 和 Linux 桌面。",
+        takeseam::PRODUCT_NAME
+    );
 }
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use eframe::egui;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+use std::path::Path;
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+const APP_LOGO: &[u8] = include_bytes!("../../assets/takeseam-brand.png");
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn load_logo(ctx: &egui::Context, icon: &egui::IconData) -> egui::TextureHandle {
+    ctx.load_texture(
+        takeseam::PRODUCT_NAME,
+        egui::ColorImage::from_rgba_unmultiplied(
+            [icon.width as usize, icon.height as usize],
+            &icon.rgba,
+        ),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn open(path: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(target_os = "macos")]
+    let program = "/usr/bin/open";
+    #[cfg(target_os = "linux")]
+    let program = "xdg-open";
+
+    let path = std::path::absolute(path).context("无法解析要打开的路径")?;
+    let mut child = std::process::Command::new(program)
+        .arg(path)
+        .spawn()
+        .context("无法打开路径")?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "desktop/portable_recorder.rs"]
+mod portable_recorder;
 
 #[cfg(windows)]
 #[path = "desktop/device_settings.rs"]
 mod device_settings;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[path = "desktop/editor.rs"]
 mod editor;
 
@@ -42,11 +93,11 @@ mod source_preview;
 #[path = "desktop/tray.rs"]
 mod tray;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[path = "desktop/ui_icons.rs"]
 mod ui_icons;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 #[path = "desktop/ui_theme.rs"]
 mod ui_theme;
 
@@ -63,6 +114,7 @@ mod desktop {
     use anyhow::{Context as _, Result, bail};
     use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, vec2};
     use takeseam::PRODUCT_NAME as APP_NAME;
+    use takeseam::i18n::{Language, Locale, key};
     use takeseam::windows_recorder::{CaptureSource, RecordingRequest, SavedRecording, record};
     use windows_capture::monitor::Monitor;
     use windows_capture::window::Window;
@@ -75,6 +127,7 @@ mod desktop {
     use super::tray::{Tray, TrayAction};
     use super::ui_icons::Icon as SharedIcon;
     use super::ui_theme;
+    use super::{APP_LOGO, load_logo, open};
 
     const FRAME_INTERVAL: Duration = Duration::from_millis(50);
     const TOOLBAR_WIDTH: f32 = 396.0;
@@ -86,7 +139,7 @@ mod desktop {
     const HINT_ROW_HEIGHT: f32 = 29.0;
     const SOURCE_CARD_WIDTH: f32 = 100.0;
     const PANEL_BUTTON_WIDTH: f32 = 28.0;
-    pub(super) const LOGO: &[u8] = include_bytes!("../../assets/takeseam-brand.png");
+    const LOGO: &[u8] = APP_LOGO;
     const TOOLBAR_LOGO: &[u8] = include_bytes!("../../assets/ottercut-toolbar-logo.png");
 
     pub fn launch() -> eframe::Result {
@@ -264,6 +317,7 @@ mod desktop {
             restart_requested: Arc<AtomicBool>,
         ) -> Self {
             ui_theme::initialize(ctx);
+            Locale::initialize_context(ctx);
             let logo = load_logo(ctx, &toolbar_icon);
             let (send_action, tray_actions) = mpsc::channel();
             let notify = ctx.clone();
@@ -516,29 +570,52 @@ mod desktop {
 
         fn toolbar(&mut self, ui: &mut egui::Ui) -> Option<egui::Pos2> {
             let colors = ui_theme::palette(ui.ctx());
+            let locale = Locale::from_context(ui.ctx());
             let (action, record_icon, can_record) = match &self.task {
                 Some(task) if task.stop.load(Ordering::Relaxed) => {
-                    ("正在保存", Icon::Saving, false)
+                    (locale.text(key::RECORD_SAVING), Icon::Saving, false)
                 }
-                Some(task) if task.started.is_some() => {
-                    ("停止并保存", Icon::Shared(SharedIcon::Stop), true)
-                }
-                Some(_) => ("停止录制", Icon::Shared(SharedIcon::Stop), true),
-                None => ("开始录制", Icon::Record, !self.sources.is_empty()),
+                Some(task) if task.started.is_some() => (
+                    locale.text(key::RECORD_STOP),
+                    Icon::Shared(SharedIcon::Stop),
+                    true,
+                ),
+                Some(_) => (
+                    locale.text(key::RECORD_STOP),
+                    Icon::Shared(SharedIcon::Stop),
+                    true,
+                ),
+                None => (
+                    locale.text(key::RECORD_START),
+                    Icon::Record,
+                    !self.sources.is_empty(),
+                ),
             };
             let (source_name, source_icon) = match self.kind {
-                SourceKind::Display => ("选择录制来源（屏幕）", Icon::Display),
-                SourceKind::Window => ("选择录制来源（窗口）", Icon::Window),
+                SourceKind::Display => (locale.text(key::SOURCE_DISPLAY), Icon::Display),
+                SourceKind::Window => (locale.text(key::SOURCE_WINDOW), Icon::Window),
             };
-            let (editor_icon, editor_label, editor_active, editor_enabled) = match self
-                .editor
-                .state()
-            {
-                EditorWindowState::Closed => (Icon::Editor, "打开剪辑台", false, true),
-                EditorWindowState::Opening => (Icon::Editor, "正在打开剪辑台", false, false),
-                EditorWindowState::Visible => (Icon::EditorMinimize, "收起剪辑台", true, true),
-                EditorWindowState::Minimized => (Icon::EditorRestore, "恢复剪辑台", false, true),
-            };
+            let (editor_icon, editor_label, editor_active, editor_enabled) =
+                match self.editor.state() {
+                    EditorWindowState::Closed => {
+                        (Icon::Editor, locale.text(key::EDITOR_OPEN), false, true)
+                    }
+                    EditorWindowState::Opening => {
+                        (Icon::Editor, locale.text(key::EDITOR_OPENING), false, false)
+                    }
+                    EditorWindowState::Visible => (
+                        Icon::EditorMinimize,
+                        locale.text(key::EDITOR_MINIMIZE),
+                        true,
+                        true,
+                    ),
+                    EditorWindowState::Minimized => (
+                        Icon::EditorRestore,
+                        locale.text(key::EDITOR_RESTORE),
+                        false,
+                        true,
+                    ),
+                };
             let mut command = None;
             let mut buttons = Vec::with_capacity(7);
             let mut toolbar_button = |ui: &mut egui::Ui, icon, label, selected| {
@@ -566,7 +643,7 @@ mod desktop {
                         logo.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Image, true, APP_NAME)
                         });
-                        queue_icon_hint(ui, &logo, "拖动工具条");
+                        queue_icon_hint(ui, &logo, locale.text(key::TOOLBAR_DRAG));
                         if toolbar_button(
                             ui,
                             source_icon,
@@ -580,9 +657,9 @@ mod desktop {
 
                         ui.add_enabled_ui(self.task.is_none(), |ui| {
                             let label = if self.microphone {
-                                "关闭麦克风"
+                                locale.text(key::MICROPHONE_DISABLE)
                             } else {
-                                "开启麦克风"
+                                locale.text(key::MICROPHONE_ENABLE)
                             };
                             if toolbar_button(
                                 ui,
@@ -595,9 +672,9 @@ mod desktop {
                                 command = Some(ToolbarCommand::ToggleMicrophone);
                             }
                             let label = if self.click_follow {
-                                "关闭点击跟随"
+                                locale.text(key::CLICK_FOLLOW_DISABLE)
                             } else {
-                                "开启点击跟随"
+                                locale.text(key::CLICK_FOLLOW_ENABLE)
                             };
                             if toolbar_button(ui, Icon::ClickFollow, label, Some(self.click_follow))
                                 .clicked()
@@ -628,7 +705,7 @@ mod desktop {
                         if toolbar_button(
                             ui,
                             Icon::Settings,
-                            "设备设置",
+                            locale.text(key::SETTINGS),
                             Some(self.panel == Some(PopupPage::Devices)),
                         )
                         .clicked()
@@ -636,9 +713,9 @@ mod desktop {
                             command = Some(ToolbarCommand::TogglePanel(PopupPage::Devices));
                         }
                         let close = if self.tray.is_some() {
-                            "隐藏工具栏"
+                            locale.text(key::HIDE_TOOLBAR)
                         } else {
-                            "关闭"
+                            locale.text(key::CLOSE)
                         };
                         if toolbar_button(ui, Icon::Shared(SharedIcon::Close), close, None)
                             .clicked()
@@ -803,6 +880,7 @@ mod desktop {
 
         fn sources_panel(&mut self, ui: &mut egui::Ui) {
             let colors = ui_theme::palette(ui.ctx());
+            let locale = Locale::from_context(ui.ctx());
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             ui.spacing_mut().interact_size.y = 28.0;
@@ -814,16 +892,44 @@ mod desktop {
             };
             let header = ui
                 .horizontal(|ui| {
-                    ui.label(RichText::new("录制来源").size(13.0).strong());
+                    ui.label(
+                        RichText::new(locale.text(key::SOURCE_TITLE))
+                            .size(13.0)
+                            .strong(),
+                    );
                     let detail = ui.allocate_response(vec2(94.0, 16.0), egui::Sense::hover());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if panel_icon_button(ui, Icon::Shared(theme_icon), theme_hint).clicked()
                             && let Err(error) = ui_theme::toggle(ui.ctx())
                         {
-                            self.message = format!("无法保存主题设置（{error}）");
+                            self.message = format!("{}（{error}）", locale.text(key::SWITCH_LIGHT));
                         }
+                        ui.menu_button(locale.text(key::LANGUAGE), |ui| {
+                            for language in [Language::ZhCn, Language::EnUs] {
+                                let selected = locale.language() == language;
+                                let label = match language {
+                                    Language::ZhCn => locale.text(key::LANGUAGE_ZH),
+                                    Language::EnUs => locale.text(key::LANGUAGE_EN),
+                                };
+                                if ui.selectable_label(selected, label).clicked() {
+                                    if let Err(error) =
+                                        Locale::set_context_and_persist(ui.ctx(), language)
+                                    {
+                                        self.message =
+                                            format!("{}: {error}", locale.text(key::LANGUAGE));
+                                    }
+                                    ui.close();
+                                }
+                            }
+                        });
                         ui.add_enabled_ui(self.task.is_none(), |ui| {
-                            if panel_icon_button(ui, Icon::Refresh, "刷新来源").clicked() {
+                            if panel_icon_button(
+                                ui,
+                                Icon::Refresh,
+                                locale.text(key::SOURCE_REFRESH),
+                            )
+                            .clicked()
+                            {
                                 self.refresh_sources();
                             }
                             self.source_mode_buttons(ui);
@@ -841,7 +947,7 @@ mod desktop {
             };
             let detail = if remaining > 0 {
                 Some((
-                    format!("右侧还有 {remaining} 张"),
+                    locale.format(key::SOURCE_REMAINING, &[("count", &remaining.to_string())]),
                     egui::FontId::proportional(11.0),
                 ))
             } else if self.kind == SourceKind::Display {
@@ -1386,17 +1492,6 @@ mod desktop {
         }
     }
 
-    pub(super) fn load_logo(ctx: &egui::Context, icon: &egui::IconData) -> egui::TextureHandle {
-        ctx.load_texture(
-            APP_NAME,
-            egui::ColorImage::from_rgba_unmultiplied(
-                [icon.width as usize, icon.height as usize],
-                &icon.rgba,
-            ),
-            egui::TextureOptions::LINEAR,
-        )
-    }
-
     enum Icon {
         Display,
         Window,
@@ -1679,14 +1774,6 @@ mod desktop {
             }
         }
         bail!("保存目录中的录像编号已用完，请更改目录")
-    }
-
-    pub(super) fn open(path: &Path) -> Result<()> {
-        Command::new("explorer.exe")
-            .arg(path)
-            .spawn()
-            .context("无法打开路径")?;
-        Ok(())
     }
 
     #[cfg(test)]

@@ -207,9 +207,7 @@ fn initialize_style(ctx: &egui::Context, editor: bool) {
     }
     set_fonts(ctx);
 
-    let path = std::env::var_os("LOCALAPPDATA")
-        .filter(|path| !path.is_empty())
-        .map(|path| PathBuf::from(path).join("TakeSeam").join("theme"));
+    let path = takeseam::config_directory().map(|path| path.join("theme"));
     let stored = path.as_deref().and_then(read_preference);
     ctx.data_mut(|data| {
         data.insert_temp(
@@ -373,26 +371,55 @@ fn style(theme: Theme, palette: Palette) -> egui::Style {
 
 fn set_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    #[cfg(windows)]
     if let Some(windows) = std::env::var_os("WINDIR") {
         let directory = PathBuf::from(windows).join("Fonts");
-        for (name, file) in [("ui-latin", "segoeui.ttf"), ("ui-chinese", "msyh.ttc")] {
-            if let Ok(data) = fs::read(directory.join(file)) {
-                fonts
-                    .font_data
-                    .insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
-                if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional)
-                {
-                    proportional.insert(0, name.into());
-                }
-                if name == "ui-chinese"
-                    && let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace)
-                {
-                    monospace.push(name.into());
-                }
-            }
+        add_ui_font(&mut fonts, "ui-latin", directory.join("segoeui.ttf"), false);
+        add_ui_font(&mut fonts, "ui-chinese", directory.join("msyh.ttc"), true);
+    }
+    #[cfg(target_os = "macos")]
+    for path in [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/LanguageSupport/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+    ] {
+        if add_ui_font(&mut fonts, "ui-chinese", Path::new(path), true) {
+            break;
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Ok(output) = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", "sans-serif:lang=zh-cn"])
+        .output()
+        && output.status.success()
+        && let Ok(path) = String::from_utf8(output.stdout)
+    {
+        add_ui_font(&mut fonts, "ui-chinese", Path::new(path.trim()), true);
+    }
     ctx.set_fonts(fonts);
+}
+
+fn add_ui_font(
+    fonts: &mut egui::FontDefinitions,
+    name: &str,
+    path: impl AsRef<Path>,
+    monospace_fallback: bool,
+) -> bool {
+    let Ok(data) = fs::read(path) else {
+        return false;
+    };
+    fonts
+        .font_data
+        .insert(name.into(), Arc::new(egui::FontData::from_owned(data)));
+    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        proportional.insert(0, name.into());
+    }
+    if monospace_fallback
+        && let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace)
+    {
+        monospace.push(name.into());
+    }
+    true
 }
 
 #[cfg(test)]

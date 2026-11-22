@@ -2,6 +2,7 @@ use eframe::egui::{self, Align2, FontId, Sense, Stroke, pos2, vec2};
 
 use crate::ui_icons::paint_icon_focus;
 use crate::ui_theme::upper_palette;
+use takeseam::i18n::{Locale, key};
 
 use super::layout;
 
@@ -16,7 +17,9 @@ pub(super) fn show(ui: &mut egui::Ui, can_open: bool) -> Option<FileAction> {
     let (bounds, button) = ui.allocate_exact_size(vec2(56.0, 28.0), Sense::click());
     let popup_id = button.id.with("file-menu");
     let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-    button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "文件"));
+    let locale = Locale::from_context(ui.ctx());
+    let file_label = locale.text(key::FILE);
+    button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, file_label));
     let button = button.on_hover_cursor(egui::CursorIcon::PointingHand);
     let painter = ui.painter();
     if open || button.hovered() {
@@ -26,7 +29,7 @@ pub(super) fn show(ui: &mut egui::Ui, can_open: bool) -> Option<FileAction> {
     painter.text(
         pos2(bounds.left() + 10.0, y),
         Align2::LEFT_CENTER,
-        "文件",
+        file_label,
         FontId::proportional(12.0),
         colors.text,
     );
@@ -53,11 +56,12 @@ pub(super) fn show(ui: &mut egui::Ui, can_open: bool) -> Option<FileAction> {
         .show(|ui| {
             layout::compact_menu(ui);
             ui.set_min_width(150.0);
-            let import = ui.button("导入素材");
+            let import = ui.button(locale.text(key::IMPORT_MEDIA));
             let open = ui
-                .add_enabled(can_open, egui::Button::new("打开工程"))
-                .on_disabled_hover_text("旁白保存后可打开工程");
-            let save = ui.add(egui::Button::new("保存工程").shortcut_text("Ctrl+S"));
+                .add_enabled(can_open, egui::Button::new(locale.text(key::OPEN_PROJECT)))
+                .on_disabled_hover_text(locale.text(key::NARRATION_SAVE_BEFORE_OPEN));
+            let save =
+                ui.add(egui::Button::new(locale.text(key::SAVE_PROJECT)).shortcut_text("Ctrl+S"));
             let action = if import.clicked() {
                 FileAction::Import
             } else if open.clicked() {

@@ -1,5 +1,3 @@
-use std::os::windows::process::CommandExt;
-use std::process::Command;
 use std::thread;
 use std::time::Instant;
 
@@ -9,6 +7,7 @@ use takeseam::editor_timeline::{
     TextStyle,
 };
 
+use super::super::media::hidden_command;
 use super::*;
 
 #[test]
@@ -407,8 +406,7 @@ fn wait_for_preview(
 }
 
 fn color_fixture(tools: &MediaTools, path: &Path, color: &str, size: &str) -> MediaInfo {
-    let generated = Command::new(&tools.ffmpeg)
-        .creation_flags(0x0800_0000)
+    let generated = hidden_command(&tools.ffmpeg)
         .args([
             "-v",
             "error",
