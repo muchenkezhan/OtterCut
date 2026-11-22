@@ -16,10 +16,134 @@ use takeseam::editor_timeline::{Clip, Track, TrackKind};
 use super::background::BackgroundSettings;
 use super::canvas_format::CanvasFormat;
 use super::media::background;
-use super::media::overlays::{Overlays, SCRIPT_NAME, VIDEO_FPS, sequence_size};
+use super::media::overlays::{Overlays, SCRIPT_NAME, sequence_size};
 use super::media::{
     MediaInfo, MediaTools, append_clip_volume_filter, hidden_command, local_media, sequence_filter,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExportQuality {
+    High,
+    Standard,
+    Small,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExportResolution {
+    Canvas,
+    Hd,
+    FullHd,
+    UltraHd,
+}
+
+impl Default for ExportResolution {
+    fn default() -> Self {
+        Self::Canvas
+    }
+}
+
+impl ExportResolution {
+    fn dimensions(self, source: (u32, u32)) -> (u32, u32) {
+        let (target_width, target_height) = match self {
+            Self::Canvas => return source,
+            Self::Hd => (1280, 720),
+            Self::FullHd => (1920, 1080),
+            Self::UltraHd => (3840, 2160),
+        };
+        let (target_width, target_height) = if source.1 > source.0 {
+            (target_height, target_width)
+        } else {
+            (target_width, target_height)
+        };
+        let scale = f64::min(
+            f64::from(target_width) / f64::from(source.0),
+            f64::from(target_height) / f64::from(source.1),
+        );
+        let width = (f64::from(source.0) * scale).round() as u32;
+        let height = (f64::from(source.1) * scale).round() as u32;
+        (width.max(2) & !1, height.max(2) & !1)
+    }
+}
+
+impl ExportQuality {
+    pub(super) fn crf(self) -> u8 {
+        match self {
+            Self::High => 16,
+            Self::Standard => 19,
+            Self::Small => 23,
+        }
+    }
+
+    pub(super) fn preset(self) -> &'static str {
+        match self {
+            Self::High => "slow",
+            Self::Standard => "veryfast",
+            Self::Small => "faster",
+        }
+    }
+
+    pub(super) fn bitrate(self) -> &'static str {
+        match self {
+            Self::High => "12M",
+            Self::Standard => "8M",
+            Self::Small => "5M",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ExportSettings {
+    pub title: String,
+    pub output: PathBuf,
+    pub output_text: String,
+    pub fps: u32,
+    pub quality: ExportQuality,
+    pub resolution: ExportResolution,
+    pub audio: bool,
+    pub audio_bitrate: u32,
+    pub include_background: bool,
+    pub include_subtitles: bool,
+}
+
+impl ExportSettings {
+    pub(super) fn new(directory: &Path) -> Self {
+        let title = format!("{}-剪辑", takeseam::PRODUCT_NAME);
+        let output = directory.join(format!("{title}.mp4"));
+        Self {
+            title,
+            output_text: output.to_string_lossy().into_owned(),
+            output,
+            fps: 30,
+            quality: ExportQuality::Standard,
+            resolution: ExportResolution::Canvas,
+            audio: true,
+            audio_bitrate: 192,
+            include_background: true,
+            include_subtitles: true,
+        }
+    }
+
+    pub(super) fn resolve_output(&mut self, directory: &Path) -> Result<()> {
+        let text = self.output_text.trim();
+        ensure!(!text.is_empty(), "请输入导出文件路径");
+        let mut output = PathBuf::from(text);
+        if !output.is_absolute() {
+            output = directory.join(output);
+        }
+        if output.extension().is_none() {
+            output.set_extension("mp4");
+        }
+        ensure!(
+            output
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")),
+            "当前格式仅支持 .mp4"
+        );
+        self.output = output;
+        self.output_text = self.output.to_string_lossy().into_owned();
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ExportJob {
@@ -43,7 +167,7 @@ impl ExportJob {
         ctx: &egui::Context,
         tools: MediaTools,
         tracks: Vec<Track>,
-        output: PathBuf,
+        settings: ExportSettings,
         canvas_format: CanvasFormat,
         backdrop: BackgroundSettings,
     ) -> Result<()> {
@@ -59,10 +183,11 @@ impl ExportJob {
         thread::Builder::new()
             .name(format!("{} export", takeseam::PRODUCT_NAME))
             .spawn(move || {
-                let result = export(
+                let output = settings.output.clone();
+                let result = export_with_settings(
                     &tools,
                     &tracks,
-                    &output,
+                    &settings,
                     canvas_format,
                     &backdrop,
                     &worker_cancel,
@@ -119,6 +244,7 @@ impl Drop for ExportJob {
     }
 }
 
+#[cfg(test)]
 fn export(
     tools: &MediaTools,
     tracks: &[Track],
@@ -126,17 +252,46 @@ fn export(
     canvas_format: CanvasFormat,
     backdrop: &BackgroundSettings,
     cancel: &AtomicBool,
+    progress: impl FnMut(f32),
+) -> Result<()> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let mut settings = ExportSettings::new(parent);
+    settings.output = output.to_path_buf();
+    settings.output_text = output.to_string_lossy().into_owned();
+    export_with_settings(
+        tools,
+        tracks,
+        &settings,
+        canvas_format,
+        backdrop,
+        cancel,
+        progress,
+    )
+}
+
+fn export_with_settings(
+    tools: &MediaTools,
+    tracks: &[Track],
+    settings: &ExportSettings,
+    canvas_format: CanvasFormat,
+    backdrop: &BackgroundSettings,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(f32),
 ) -> Result<()> {
     ensure!(
-        output
+        settings
+            .output
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4")),
         "导出文件扩展名必须是 .mp4",
     );
-    ensure!(!output.try_exists()?, "输出文件已存在，请换个文件名");
+    ensure!(
+        !settings.output.try_exists()?,
+        "输出文件已存在，请换个文件名"
+    );
     ensure!(backdrop.is_valid(), "背景设置无效");
-    let parent = output
+    let parent = settings
+        .output
         .parent()
         .filter(|path| path.is_dir())
         .context("输出目录不可用")?;
@@ -154,23 +309,34 @@ fn export(
         .context("时间线为空")?;
     let media = probe_tracks(tools, tracks, cancel)?;
     ensure!(canvas_format.is_valid(), "画幅尺寸无效");
-    let (width, height) = canvas_format
+    let canvas_dimensions = canvas_format
         .dimensions()
         .unwrap_or_else(|| canvas_size(tracks, &media));
-    if backdrop.enabled() {
+    let (width, height) = settings.resolution.dimensions(canvas_dimensions);
+    if settings.include_background && backdrop.enabled() {
         background::stage(backdrop, &stage_dir, (width, height))?;
     }
     let profile = Profile {
         width,
         height,
         encoder: encoder(tools)?,
+        fps: settings.fps,
+        quality: settings.quality,
+        crf: settings.quality.crf(),
+        audio: settings.audio,
     };
+    let disabled_background = BackgroundSettings::default();
     let process = RenderContext {
         tools,
         stage: &stage_dir,
         log: &log,
         cancel,
-        backdrop,
+        backdrop: if settings.include_background {
+            backdrop
+        } else {
+            &disabled_background
+        },
+        include_subtitles: settings.include_subtitles,
     };
     let mut boundaries = vec![0, length];
     boundaries.extend(
@@ -202,39 +368,37 @@ fn export(
         .suffix(".mp4")
         .tempfile_in(parent)?
         .into_temp_path();
-    run(
-        command(tools)
-            .args([
-                "-f",
-                "concat",
-                "-safe",
-                "1",
-                "-protocol_whitelist",
-                "file,pipe",
-                "-i",
-            ])
-            .arg(manifest)
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-movflags",
-                "+faststart",
-            ])
-            .arg(final_file.as_os_str()),
-        &log,
-        cancel,
-    )
-    .context("无法合并导出片段")?;
+    let mut final_command = command(tools);
+    final_command
+        .args([
+            "-f",
+            "concat",
+            "-safe",
+            "1",
+            "-protocol_whitelist",
+            "file,pipe",
+            "-i",
+        ])
+        .arg(manifest)
+        .args(["-map", "0:v:0", "-c:v", "copy", "-movflags", "+faststart"]);
+    if settings.audio {
+        final_command.args([
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "aac",
+            "-b:a",
+            &format!("{}k", settings.audio_bitrate),
+        ]);
+    } else {
+        final_command.arg("-an");
+    }
+    final_command.arg(final_file.as_os_str());
+    run(&mut final_command, &log, cancel).context("无法合并导出片段")?;
     check_cancel(cancel)?;
     ensure!(fs::metadata(&final_file)?.len() > 0, "导出文件为空");
     final_file
-        .persist_noclobber(output)
+        .persist_noclobber(&settings.output)
         .map_err(|error| error.error)
         .context("无法保存导出视频")?;
     progress(1.0);
@@ -340,6 +504,10 @@ struct Profile {
     width: u32,
     height: u32,
     encoder: &'static str,
+    fps: u32,
+    quality: ExportQuality,
+    crf: u8,
+    audio: bool,
 }
 
 struct RenderContext<'a> {
@@ -348,6 +516,7 @@ struct RenderContext<'a> {
     log: &'a Path,
     cancel: &'a AtomicBool,
     backdrop: &'a BackgroundSettings,
+    include_subtitles: bool,
 }
 
 fn render_segment(
@@ -363,19 +532,27 @@ fn render_segment(
     if let Some(clip) = segment.video {
         input_clip(&mut ffmpeg, segment, clip, false)?;
     } else {
-        ffmpeg
-            .args(["-f", "lavfi", "-i"])
-            .arg(format!("color=c=black:s={width}x{height}:r={VIDEO_FPS}"));
+        ffmpeg.args(["-f", "lavfi", "-i"]).arg(format!(
+            "color=c=black:s={width}x{height}:r={}",
+            profile.fps
+        ));
     }
-    let audio_map = audio_mix(&mut ffmpeg, segment, &duration)?;
-    let input_filter =
-        format!("fps={VIDEO_FPS}:start_time=0,tpad=stop_mode=clone:stop_duration={duration}");
+    let audio_map = profile
+        .audio
+        .then(|| audio_mix(&mut ffmpeg, segment, &duration))
+        .transpose()?;
+    let input_filter = format!(
+        "fps={}:start_time=0,tpad=stop_mode=clone:stop_duration={duration}",
+        profile.fps
+    );
     let mut output_filter = String::from("format=yuv420p");
-    if segment.overlays.write_for_playback(
-        process.stage,
-        (width, height),
-        segment.start..segment.end,
-    )? {
+    if process.include_subtitles
+        && segment.overlays.write_for_playback(
+            process.stage,
+            (width, height),
+            segment.start..segment.end,
+        )?
+    {
         ffmpeg.current_dir(process.stage);
         let _ = write!(output_filter, ",ass=filename={SCRIPT_NAME}");
     }
@@ -398,27 +575,28 @@ fn render_segment(
             sequence_filter(width, height)
         )
     };
-    ffmpeg.args(["-t", &duration, "-map", "0:V:0", "-map", audio_map]);
+    ffmpeg.args(["-t", &duration, "-map", "0:V:0"]);
+    if let Some(audio_map) = audio_map {
+        ffmpeg.args(["-map", audio_map]);
+    }
     ffmpeg.args(["-vf", &video, "-c:v", profile.encoder]);
     if profile.encoder == "libx264" {
-        ffmpeg.args(["-preset", "veryfast", "-crf", "19"]);
+        ffmpeg.args([
+            "-preset",
+            profile.quality.preset(),
+            "-crf",
+            &profile.crf.to_string(),
+        ]);
     } else {
-        ffmpeg.args(["-b:v", "8M"]);
+        ffmpeg.args(["-b:v", profile.quality.bitrate()]);
     }
-    ffmpeg.args([
-        "-pix_fmt",
-        "yuv420p",
-        "-bf",
-        "0",
-        "-c:a",
-        "pcm_s16le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-video_track_timescale",
-        "90000",
-    ]);
+    ffmpeg.args(["-pix_fmt", "yuv420p", "-bf", "0"]);
+    if profile.audio {
+        ffmpeg.args(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]);
+    } else {
+        ffmpeg.arg("-an");
+    }
+    ffmpeg.args(["-video_track_timescale", "90000"]);
     ffmpeg.arg(process.stage.join(filename));
     run(&mut ffmpeg, process.log, process.cancel)
 }
@@ -565,6 +743,39 @@ mod tests {
         OverlayText, PRIMARY_AUDIO, TextAppearance, TextPlacement, TextPosition, TextStyle,
         Timeline,
     };
+
+    #[test]
+    fn export_settings_resolve_relative_mp4_and_keep_quality_options() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = ExportSettings::new(directory.path());
+        settings.output_text = "final.mp4".into();
+        settings.resolve_output(directory.path()).unwrap();
+        assert_eq!(settings.output, directory.path().join("final.mp4"));
+        assert_eq!(ExportQuality::High.crf(), 16);
+        assert_eq!(ExportQuality::Standard.crf(), 19);
+        assert_eq!(ExportQuality::Small.crf(), 23);
+    }
+
+    #[test]
+    fn export_settings_reject_non_mp4_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = ExportSettings::new(directory.path());
+        settings.output_text = "final.webm".into();
+        assert!(settings.resolve_output(directory.path()).is_err());
+    }
+
+    #[test]
+    fn export_resolution_preserves_landscape_and_portrait_aspect() {
+        assert_eq!(
+            ExportResolution::FullHd.dimensions((1920, 1080)),
+            (1920, 1080)
+        );
+        assert_eq!(
+            ExportResolution::FullHd.dimensions((1080, 1920)),
+            (1080, 1920)
+        );
+        assert_eq!(ExportResolution::Hd.dimensions((1920, 1080)), (1280, 720));
+    }
 
     #[test]
     #[ignore = "requires local FFmpeg and FFprobe"]

@@ -608,7 +608,7 @@ mod tests {
             )
             .unwrap();
         assert_ne!(inserted[0].0, first_track);
-        assert_eq!(inserted[1].0, inserted[0].0);
+        assert_ne!(inserted[1].0, inserted[0].0);
         assert_eq!(timeline.clip(existing).unwrap().start, 10);
         assert_eq!(
             timeline
@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_visual_track_groups_and_rejects_invalid_changes_atomically() {
+    fn keeps_track_types_fixed_and_rejects_invalid_changes_atomically() {
         let mut timeline = Timeline::default();
         let (caption, _) = timeline
             .insert_text(TrackKind::Caption, 0, 30, overlay("字幕"))
@@ -665,11 +665,23 @@ mod tests {
         let original = timeline.tracks().to_vec();
         assert_eq!(
             original.iter().map(|track| track.id).collect::<Vec<_>>(),
-            vec![title, caption, video, 3, PRIMARY_VIDEO, PRIMARY_AUDIO]
+            vec![3, PRIMARY_VIDEO, PRIMARY_AUDIO, caption, title, video]
         );
+        let inserted = timeline
+            .add_track_before(TrackKind::Video, Some(caption))
+            .unwrap();
         assert_eq!(
-            timeline.add_track_before(TrackKind::Video, Some(caption)),
-            Err(TimelineError::IncompatibleTrack)
+            timeline
+                .tracks()
+                .iter()
+                .position(|track| track.id == inserted)
+                .unwrap()
+                + 1,
+            timeline
+                .tracks()
+                .iter()
+                .position(|track| track.id == caption)
+                .unwrap()
         );
         let revision = timeline.revision();
         assert_eq!(
@@ -683,7 +695,19 @@ mod tests {
             timeline.insert_media_on_track(caption, "video.mp4".into(), 20, 60),
             Err(TimelineError::IncompatibleTrack)
         );
-        assert_eq!(timeline.tracks(), original);
+        assert_eq!(
+            timeline
+                .track(caption)
+                .unwrap()
+                .clips
+                .first()
+                .unwrap()
+                .text
+                .as_ref()
+                .unwrap()
+                .content,
+            "字幕"
+        );
         assert_eq!(timeline.revision(), revision);
     }
 }

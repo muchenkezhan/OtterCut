@@ -171,7 +171,6 @@ fn removing_selected_clips_preserves_gaps_and_is_atomic() {
         .unwrap();
     let original = timeline.tracks().to_vec();
     let revision = timeline.revision();
-
     assert_eq!(
         timeline.remove_clips(&[video, 999, audio]),
         Err(TimelineError::ClipNotFound(999))
@@ -264,7 +263,7 @@ fn reassignment_and_track_output_controls_have_atomic_history() {
 
     let new_video = timeline.add_track(TrackKind::Video).unwrap();
     let new_audio = timeline.add_track(TrackKind::Audio).unwrap();
-    assert_eq!(timeline.tracks().first().unwrap().id, new_video);
+    assert_eq!(timeline.tracks()[timeline.tracks().len() - 2].id, new_video);
     assert_eq!(timeline.tracks().last().unwrap().id, new_audio);
     timeline.set_track_enabled(PRIMARY_VIDEO, false).unwrap();
     assert!(!timeline.track(PRIMARY_VIDEO).unwrap().enabled);
@@ -284,12 +283,13 @@ fn adding_an_empty_track_before_an_anchor_is_undoable() {
     let original = timeline.tracks().to_vec();
     let revision = timeline.revision();
 
-    assert_eq!(
-        timeline.add_track_before(TrackKind::Audio, Some(PRIMARY_VIDEO)),
-        Err(TimelineError::IncompatibleTrack)
-    );
+    let audio_before_video = timeline
+        .add_track_before(TrackKind::Audio, Some(PRIMARY_VIDEO))
+        .unwrap();
+    assert_eq!(timeline.tracks()[1].id, audio_before_video);
+    assert_eq!(timeline.revision(), revision + 1);
+    assert!(timeline.undo());
     assert_eq!(timeline.tracks(), original);
-    assert_eq!(timeline.revision(), revision);
 
     let id = timeline
         .add_track_before(TrackKind::Video, Some(PRIMARY_VIDEO))
@@ -360,11 +360,7 @@ fn dropping_a_source_creates_and_fills_each_outer_track_in_one_edit() {
         let (track, clip) = timeline
             .insert_media_on_new_track(kind, name.into(), 30, 10)
             .unwrap();
-        let outer = match kind {
-            TrackKind::Video => timeline.tracks().first().unwrap(),
-            TrackKind::Audio => timeline.tracks().last().unwrap(),
-            _ => unreachable!("test covers imported media"),
-        };
+        let outer = timeline.tracks().last().unwrap();
         assert_eq!((outer.id, outer.kind), (track, kind));
         assert_eq!(outer.clips, [Clip::full_source(clip, name.into(), 30, 10)]);
         assert_eq!(timeline.revision(), 1);
@@ -443,32 +439,35 @@ fn pasting_to_a_new_track_preserves_trimmed_media_and_caption_style() {
 fn invalid_paste_on_new_track_does_not_consume_ids_or_history() {
     let mut timeline = Timeline::default();
     let clip = timeline.append("source.mp4".into(), 30).unwrap();
-    let undone = timeline.add_track(TrackKind::Audio).unwrap();
+    timeline.add_track(TrackKind::Audio).unwrap();
     assert!(timeline.undo());
     let source = timeline.clip(clip).unwrap().clone();
     let before = timeline.tracks().to_vec();
-    let revision = timeline.revision();
-
     assert_eq!(
         timeline.paste_on_new_track_before(TrackKind::Caption, None, &source, 0),
         Err(TimelineError::IncompatibleTrack)
     );
-    assert_eq!(
-        timeline.paste_on_new_track_before(TrackKind::Audio, Some(PRIMARY_VIDEO), &source, 0),
-        Err(TimelineError::IncompatibleTrack)
-    );
+    let (audio_track, audio_id) = timeline
+        .paste_on_new_track_before(TrackKind::Audio, Some(PRIMARY_VIDEO), &source, 0)
+        .unwrap();
+    assert_eq!(timeline.track(audio_track).unwrap().kind, TrackKind::Audio);
+    assert_eq!(timeline.track_for_clip(audio_id).unwrap().id, audio_track);
+    assert!(timeline.undo());
+    assert_eq!(timeline.tracks(), before);
+    let revision_after_undo = timeline.revision();
     assert_eq!(
         timeline.paste_on_new_track_before(TrackKind::Video, None, &source, u64::MAX),
         Err(TimelineError::TimeOutOfBounds)
     );
-    assert_eq!(timeline.revision(), revision);
+    assert_eq!(timeline.revision(), revision_after_undo);
     assert_eq!(timeline.tracks(), before);
     assert!(timeline.redo());
-    assert_eq!(timeline.tracks().last().unwrap().id, undone);
-    assert_eq!(
-        timeline.paste_on_new_track_before(TrackKind::Video, None, &source, 0),
-        Ok((undone + 1, clip + 1))
-    );
+    assert!(timeline.track(audio_track).is_some());
+    let (track, pasted) = timeline
+        .paste_on_new_track_before(TrackKind::Video, None, &source, 0)
+        .unwrap();
+    assert_ne!(pasted, clip);
+    assert_eq!(timeline.track(track).unwrap().kind, TrackKind::Video);
 }
 
 #[test]
@@ -487,11 +486,7 @@ fn moving_to_an_outer_track_preserves_the_slice_and_track_history() {
         let mut moved_clip = timeline.clip(clip).unwrap().clone();
         moved_clip.start = 19;
         let track = timeline.move_to_new_track(clip, 19).unwrap();
-        let outer = match kind {
-            TrackKind::Video => timeline.tracks().first().unwrap(),
-            TrackKind::Audio => timeline.tracks().last().unwrap(),
-            _ => unreachable!("test covers imported media"),
-        };
+        let outer = timeline.tracks().last().unwrap();
         assert_eq!((outer.id, outer.kind), (track, kind));
         assert_eq!(timeline.clip(clip), Some(&moved_clip));
         assert_eq!(timeline.clip(companion), Some(&other_clip));
@@ -624,35 +619,37 @@ fn moving_to_a_middle_track_preserves_the_slice_and_is_atomic() {
 }
 
 #[test]
-fn invalid_middle_track_anchors_leave_history_and_clips_intact() {
+fn mixed_track_order_keeps_types_fixed_and_history_atomic() {
     let mut timeline = Timeline::default();
     let video = timeline.append("video.mp4".into(), 20).unwrap();
     let lower_audio = timeline.add_track(TrackKind::Audio).unwrap();
     let removed = timeline.add_track(TrackKind::Video).unwrap();
     assert!(timeline.undo());
     let before = timeline.tracks().to_vec();
-    let revision = timeline.revision();
 
-    assert_eq!(
-        timeline.insert_media_on_new_track_before(
+    let (audio_track, audio_clip) = timeline
+        .insert_media_on_new_track_before(
             TrackKind::Audio,
             Some(PRIMARY_VIDEO),
             "audio.wav".into(),
             10,
             0,
-        ),
-        Err(TimelineError::IncompatibleTrack)
-    );
-    assert_eq!(
-        timeline.move_to_new_track_before(video, Some(lower_audio), 0),
-        Err(TimelineError::IncompatibleTrack)
-    );
+        )
+        .unwrap();
+    assert_eq!(timeline.track(audio_track).unwrap().kind, TrackKind::Audio);
+    assert_eq!(timeline.track_for_clip(audio_clip).unwrap().id, audio_track);
+
+    let moved_track = timeline
+        .move_to_new_track_before(video, Some(lower_audio), 0)
+        .unwrap();
+    assert_eq!(timeline.track(moved_track).unwrap().kind, TrackKind::Video);
+    assert_eq!(timeline.track_for_clip(video).unwrap().id, moved_track);
+
     assert_eq!(
         timeline.move_to_new_track_before(video, Some(removed), 0),
         Err(TimelineError::TrackNotFound(removed))
     );
+    assert!(timeline.undo());
+    assert!(timeline.undo());
     assert_eq!(timeline.tracks(), before);
-    assert_eq!(timeline.revision(), revision);
-    assert!(timeline.redo());
-    assert_eq!(timeline.tracks()[0].id, removed);
 }

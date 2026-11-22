@@ -824,7 +824,7 @@ impl TimelineView {
                 ui.ctx().request_repaint();
             } else {
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-                gap.paint_target(painter, view, at, source.kind, rows, timeline);
+                gap.paint_target(painter, view, at, rows);
             }
             return Ok(());
         }

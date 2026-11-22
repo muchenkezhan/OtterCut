@@ -1,5 +1,6 @@
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Painter, Rect, Sense, Stroke, Ui, pos2, vec2,
+    self, Align2, Color32, CursorIcon, FontId, Painter, Rect, Sense, Stroke, StrokeKind, Ui, pos2,
+    vec2,
 };
 use takeseam::editor_timeline::{Timeline, Track, TrackId, TrackKind};
 
@@ -293,6 +294,22 @@ impl TimelineView {
         } else {
             colors.track
         };
+        if timeline.is_empty() {
+            let empty = rows.area.shrink2(vec2(18.0, 18.0));
+            all.rect_stroke(
+                empty,
+                8,
+                Stroke::new(1.0, colors.border),
+                StrokeKind::Inside,
+            );
+            all.text(
+                empty.center(),
+                Align2::CENTER_CENTER,
+                "把素材拖进时间线，开始剪辑",
+                FontId::proportional(13.0),
+                colors.muted,
+            );
+        }
         let divider = Stroke::new(1.0_f32, background.lerp_to_gamma(colors.border, 0.75));
         for (index, track) in timeline.tracks().iter().enumerate() {
             let number = match track.kind {

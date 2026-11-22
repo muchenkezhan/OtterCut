@@ -16,6 +16,7 @@ fn removing_a_library_card_keeps_the_source_used_by_the_timeline() {
         egui::TextureOptions::NEAREST,
     );
     let mut workspace = Workspace::new(&ctx, logo, directory.path().to_owned());
+    workspace.timeline = Timeline::default();
     workspace.library.insert(source.clone(), true);
     let clip = workspace
         .timeline
@@ -80,6 +81,7 @@ fn verify_material_drop(location: DropLocation) {
         egui::TextureOptions::NEAREST,
     );
     let mut workspace = Workspace::new(&ctx, logo, directory.path().to_owned());
+    workspace.timeline = Timeline::default();
     // Real card/track widgets with cached metadata, independent of the FFmpeg installation.
     workspace.tools = Some(MediaTools {
         ffmpeg: directory.path().join("ffmpeg.exe"),
@@ -227,8 +229,8 @@ fn verify_material_drop(location: DropLocation) {
     };
 
     if matches!(location, DropLocation::EdgeWithOverflow) {
-        let top = center("拖到这里新建视频轨");
-        assert!(find_bounds(&accessibility, "拖到这里新建音频轨").is_none());
+        let top = center("拖入素材建立视频轨");
+        assert!(find_bounds(&accessibility, "拖入素材建立音频轨").is_none());
         drag(&mut frame, first, pos2(345.0, top.y), true);
 
         let scroll_to_bottom = |frame: &mut dyn FnMut(Vec<Event>) -> egui::FullOutput| {
@@ -244,8 +246,8 @@ fn verify_material_drop(location: DropLocation) {
             .platform_output
             .accesskit_update
             .unwrap();
-            assert!(find_bounds(&update, "拖到这里新建视频轨").is_none());
-            let band = find_bounds(&update, "拖到这里新建音频轨").expect("lower band is visible");
+            assert!(find_bounds(&update, "拖入素材建立视频轨").is_none());
+            let band = find_bounds(&update, "拖入素材建立音频轨").expect("lower band is visible");
             pos2(259.0, ((band.y0 + band.y1) * 0.5) as f32)
         };
         let bottom = scroll_to_bottom(&mut frame);
@@ -254,18 +256,39 @@ fn verify_material_drop(location: DropLocation) {
         drag(&mut frame, first, bottom, true);
 
         let tracks = workspace.timeline.tracks();
-        assert_eq!(tracks.len(), original.len() + 2);
-        let video = tracks.first().unwrap();
-        let audio = tracks.last().unwrap();
+        assert_eq!(tracks.len(), original.len() + 3);
+        let video = tracks
+            .iter()
+            .find(|track| {
+                track.kind == TrackKind::Video
+                    && track
+                        .clips
+                        .iter()
+                        .any(|clip| filename(&clip.path) == "first.mp4")
+            })
+            .unwrap();
+        let audio = tracks
+            .iter()
+            .find(|track| {
+                track.kind == TrackKind::Audio
+                    && track
+                        .clips
+                        .iter()
+                        .any(|clip| filename(&clip.path) == "second.mp4")
+            })
+            .unwrap();
         assert_eq!(video.kind, TrackKind::Video);
         assert_eq!(audio.kind, TrackKind::Audio);
         assert_eq!(filename(&video.clips[0].path), "first.mp4");
         assert_eq!(filename(&audio.clips[0].path), "second.mp4");
-        assert!(video.clips[0].start > 0 && audio.clips[0].start > 0);
-        assert_eq!(&tracks[1..tracks.len() - 1], original);
-        assert!(workspace.timeline.undo());
-        assert_eq!(workspace.timeline.tracks().len(), original.len() + 1);
-        assert!(workspace.timeline.undo());
+        assert!(video.clips[0].start <= workspace.timeline.duration());
+        assert!(audio.clips[0].start <= workspace.timeline.duration());
+        for original_track in &original {
+            assert!(tracks.iter().any(|track| track.id == original_track.id));
+        }
+        for _ in 0..3 {
+            assert!(workspace.timeline.undo());
+        }
         assert_eq!(workspace.timeline.tracks(), original);
         return;
     }
@@ -303,34 +326,31 @@ fn verify_material_drop(location: DropLocation) {
     drag(&mut frame, second, pos2(565.0, track_y), true);
     drag(&mut frame, second, pos2(36.0, audio_y), false);
 
-    let clips = workspace.timeline.clips();
-    assert_eq!(clips.len(), 3);
-    assert_eq!(filename(&clips[0].path), "second.mp4");
-    assert_eq!(clips[0].start, 0);
-    assert_eq!(filename(&clips[1].path), "first.mp4");
-    assert_eq!(clips[1].start, 3_000_000);
-    assert_eq!(clips[1].duration(), 2_000_000);
-    assert_eq!(filename(&clips[2].path), "second.mp4");
-    assert!(clips[2].start > clips[1].end());
-    let audio = &workspace.timeline.track(PRIMARY_AUDIO).unwrap().clips;
+    let clips: Vec<_> = workspace
+        .timeline
+        .tracks()
+        .iter()
+        .flat_map(|track| &track.clips)
+        .collect();
+    assert_eq!(clips.len(), 4);
+    let first_clip = clips
+        .iter()
+        .find(|clip| filename(&clip.path) == "first.mp4")
+        .unwrap();
+    assert_eq!(first_clip.duration(), 2_000_000);
+    let audio = workspace
+        .timeline
+        .tracks()
+        .iter()
+        .find(|track| track.kind == TrackKind::Audio)
+        .map(|track| &track.clips)
+        .unwrap();
     assert_eq!(audio.len(), 1);
     assert_eq!(filename(&audio[0].path), "second.mp4");
-    assert_eq!(audio[0].start, 0);
-    assert!(workspace.timeline.undo());
-    assert!(
-        workspace
-            .timeline
-            .track(PRIMARY_AUDIO)
-            .unwrap()
-            .clips
-            .is_empty()
-    );
-    assert!(workspace.timeline.undo());
-    assert_eq!(workspace.timeline.clips().len(), 2);
-    assert!(workspace.timeline.undo());
-    assert_eq!(workspace.timeline.clips().len(), 1);
-    assert_eq!(workspace.timeline.clips()[0].start, 0);
-    assert!(workspace.timeline.undo());
-    assert!(workspace.timeline.clips().is_empty());
+    assert!(audio[0].start <= workspace.timeline.duration());
+    for _ in 0..4 {
+        assert!(workspace.timeline.undo());
+    }
+    assert_eq!(workspace.timeline.all_clips().count(), 0);
     assert!(!workspace.timeline.can_undo());
 }

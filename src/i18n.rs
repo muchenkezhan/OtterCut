@@ -145,6 +145,32 @@ pub mod key {
     pub const DEVICE_OPEN_CAMERA: MessageKey = MessageKey("device.open_camera");
     pub const DEVICE_CLOSE_CAMERA: MessageKey = MessageKey("device.close_camera");
     pub const DEVICE_OPENING_CAMERA: MessageKey = MessageKey("device.opening_camera");
+    pub const EXPORT_SETTINGS: MessageKey = MessageKey("export.settings");
+    pub const EXPORT_OUTPUT: MessageKey = MessageKey("export.output");
+    pub const EXPORT_TITLE: MessageKey = MessageKey("export.title");
+    pub const EXPORT_FORMAT: MessageKey = MessageKey("export.format");
+    pub const EXPORT_MP4: MessageKey = MessageKey("export.mp4");
+    pub const EXPORT_QUALITY: MessageKey = MessageKey("export.quality");
+    pub const EXPORT_QUALITY_HIGH: MessageKey = MessageKey("export.quality_high");
+    pub const EXPORT_QUALITY_STANDARD: MessageKey = MessageKey("export.quality_standard");
+    pub const EXPORT_QUALITY_SMALL: MessageKey = MessageKey("export.quality_small");
+    pub const EXPORT_AUDIO: MessageKey = MessageKey("export.audio");
+    pub const EXPORT_AUDIO_BITRATE: MessageKey = MessageKey("export.audio_bitrate");
+    pub const EXPORT_BACKGROUND: MessageKey = MessageKey("export.background");
+    pub const EXPORT_START: MessageKey = MessageKey("export.start");
+    pub const EXPORT_PATH_HINT: MessageKey = MessageKey("export.path_hint");
+    pub const EXPORT_TIMELINE: MessageKey = MessageKey("export.timeline");
+    pub const EXPORT_MAIN_TIMELINE: MessageKey = MessageKey("export.main_timeline");
+    pub const EXPORT_SUBTITLES: MessageKey = MessageKey("export.subtitles");
+    pub const EXPORT_ENCODER: MessageKey = MessageKey("export.encoder");
+    pub const EXPORT_AUTO: MessageKey = MessageKey("export.auto");
+    pub const EXPORT_ESTIMATE: MessageKey = MessageKey("export.estimate");
+    pub const EXPORT_PREVIEW: MessageKey = MessageKey("export.preview");
+    pub const EXPORT_RESOLUTION: MessageKey = MessageKey("export.resolution");
+    pub const EXPORT_RESOLUTION_CANVAS: MessageKey = MessageKey("export.resolution_canvas");
+    pub const EXPORT_RESOLUTION_720: MessageKey = MessageKey("export.resolution_720");
+    pub const EXPORT_RESOLUTION_1080: MessageKey = MessageKey("export.resolution_1080");
+    pub const EXPORT_RESOLUTION_4K: MessageKey = MessageKey("export.resolution_4k");
 
     pub const ALL: &[MessageKey] = &[
         APP_NAME,
@@ -235,6 +261,32 @@ pub mod key {
         DEVICE_OPEN_CAMERA,
         DEVICE_CLOSE_CAMERA,
         DEVICE_OPENING_CAMERA,
+        EXPORT_SETTINGS,
+        EXPORT_OUTPUT,
+        EXPORT_TITLE,
+        EXPORT_FORMAT,
+        EXPORT_MP4,
+        EXPORT_QUALITY,
+        EXPORT_QUALITY_HIGH,
+        EXPORT_QUALITY_STANDARD,
+        EXPORT_QUALITY_SMALL,
+        EXPORT_AUDIO,
+        EXPORT_AUDIO_BITRATE,
+        EXPORT_BACKGROUND,
+        EXPORT_START,
+        EXPORT_PATH_HINT,
+        EXPORT_TIMELINE,
+        EXPORT_MAIN_TIMELINE,
+        EXPORT_SUBTITLES,
+        EXPORT_ENCODER,
+        EXPORT_AUTO,
+        EXPORT_ESTIMATE,
+        EXPORT_PREVIEW,
+        EXPORT_RESOLUTION,
+        EXPORT_RESOLUTION_CANVAS,
+        EXPORT_RESOLUTION_720,
+        EXPORT_RESOLUTION_1080,
+        EXPORT_RESOLUTION_4K,
     ];
 }
 
@@ -437,6 +489,32 @@ fn message_zh(key: MessageKey) -> &'static str {
         "device.open_camera" => "打开摄像头预览",
         "device.close_camera" => "关闭摄像头预览",
         "device.opening_camera" => "正在打开摄像头…",
+        "export.settings" => "导出设置",
+        "export.output" => "输出文件",
+        "export.title" => "标题",
+        "export.format" => "格式",
+        "export.mp4" => "MP4 视频",
+        "export.quality" => "视频质量",
+        "export.quality_high" => "高质量",
+        "export.quality_standard" => "标准",
+        "export.quality_small" => "小文件",
+        "export.audio" => "导出音频",
+        "export.audio_bitrate" => "音频码率",
+        "export.background" => "包含动态背景",
+        "export.start" => "开始导出",
+        "export.path_hint" => "可输入绝对路径或相对工程目录的文件名",
+        "export.timeline" => "导出时间线",
+        "export.main_timeline" => "主时间线",
+        "export.subtitles" => "字幕与画面文字",
+        "export.encoder" => "视频编码",
+        "export.auto" => "自动 · H.264",
+        "export.estimate" => "时长 {duration} · 预计大小 {size}",
+        "export.preview" => "成片预览",
+        "export.resolution" => "分辨率",
+        "export.resolution_canvas" => "项目画幅",
+        "export.resolution_720" => "720p",
+        "export.resolution_1080" => "1080p",
+        "export.resolution_4k" => "4K",
         _ => key.0,
     }
 }
@@ -531,6 +609,32 @@ fn message_en(key: MessageKey) -> &'static str {
         "device.open_camera" => "Open camera preview",
         "device.close_camera" => "Close camera preview",
         "device.opening_camera" => "Opening camera…",
+        "export.settings" => "Export settings",
+        "export.output" => "Output file",
+        "export.title" => "Title",
+        "export.format" => "Format",
+        "export.mp4" => "MP4 video",
+        "export.quality" => "Video quality",
+        "export.quality_high" => "High quality",
+        "export.quality_standard" => "Standard",
+        "export.quality_small" => "Small file",
+        "export.audio" => "Export audio",
+        "export.audio_bitrate" => "Audio bitrate",
+        "export.background" => "Include dynamic background",
+        "export.start" => "Start export",
+        "export.path_hint" => "Enter an absolute path or a filename relative to the project folder",
+        "export.timeline" => "Export timeline",
+        "export.main_timeline" => "Main timeline",
+        "export.subtitles" => "Subtitles and on-screen text",
+        "export.encoder" => "Video encoder",
+        "export.auto" => "Automatic · H.264",
+        "export.estimate" => "Duration {duration} · Estimated size {size}",
+        "export.preview" => "Export preview",
+        "export.resolution" => "Resolution",
+        "export.resolution_canvas" => "Project canvas",
+        "export.resolution_720" => "720p",
+        "export.resolution_1080" => "1080p",
+        "export.resolution_4k" => "4K",
         _ => message_zh(key),
     }
 }

@@ -11,7 +11,7 @@ use super::background::{BackgroundSettings, BackgroundSource};
 use super::background_panel;
 use super::canvas_format::CanvasFormat;
 use super::dock_model::{DockState, Pane};
-use super::export::ExportJob;
+use super::export::{ExportJob, ExportQuality, ExportResolution, ExportSettings};
 use super::feature_panel::{self, FeatureTab};
 use super::file_menu::{self, FileAction};
 use super::inspector_details;
@@ -68,6 +68,7 @@ pub(super) struct Workspace {
     preview_viewport: PreviewViewport,
     pending_additions: VecDeque<MaterialAddition>,
     export: ExportJob,
+    export_settings: Option<ExportSettings>,
     notice: Option<Notice>,
     media_error: Option<String>,
     focused: bool,
@@ -117,7 +118,7 @@ impl Workspace {
             material_info: None,
             thumbnails,
             material_drag: asset_cards::MaterialDrag::default(),
-            timeline: Timeline::default(),
+            timeline: Timeline::from_tracks(Vec::new()).expect("empty timeline is valid"),
             selected_clip: None,
             project: None,
             saved_revision: 0,
@@ -130,6 +131,7 @@ impl Workspace {
             preview_viewport: PreviewViewport::default(),
             pending_additions: VecDeque::new(),
             export: ExportJob::default(),
+            export_settings: None,
             notice: None,
             media_error: None,
             focused: false,
@@ -250,23 +252,18 @@ impl Workspace {
                 }
             };
             let mut destination = addition.destination;
-            if let TrackDestination::New {
-                kind: TrackKind::Video,
-                before: Some(before),
-            } = destination
-                && !media.has_video
-                && media.has_audio
-                && self.timeline.tracks().windows(2).any(|pair| {
-                    pair[0].kind.stack_order() <= TrackKind::Video.stack_order()
-                        && pair[1].kind == TrackKind::Audio
-                        && pair[1].id == before
-                })
-            {
-                // At the video/audio seam either kind fits. The drag can precede probing.
-                destination = TrackDestination::New {
-                    kind: TrackKind::Audio,
-                    before: Some(before),
-                };
+            if let TrackDestination::New { kind, before } = destination {
+                if kind == TrackKind::Video && !media.has_video && media.has_audio {
+                    destination = TrackDestination::New {
+                        kind: TrackKind::Audio,
+                        before,
+                    };
+                } else if kind == TrackKind::Audio && media.has_video && !media.has_audio {
+                    destination = TrackDestination::New {
+                        kind: TrackKind::Video,
+                        before,
+                    };
+                }
             }
             let (kind, start) = match destination {
                 TrackDestination::Existing(id) => {
@@ -463,25 +460,31 @@ impl Workspace {
         if !self.commit_overlay_draft() {
             return;
         }
+        if self.tools.is_none() {
+            self.show_notice("FFmpeg 不可用，无法导出", true);
+            return;
+        }
+        self.export_settings = Some(ExportSettings::new(self.library.directory()));
+        ctx.request_repaint();
+    }
+
+    fn start_export(&mut self, ctx: &egui::Context, mut settings: ExportSettings) {
         let Some(tools) = self.tools.clone() else {
+            self.show_notice("FFmpeg 不可用，无法导出", true);
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("导出 MP4")
-            .set_directory(self.library.directory())
-            .set_file_name(format!("{PRODUCT_NAME}-剪辑.mp4"))
-            .add_filter("MP4 视频", &["mp4"])
-            .save_file()
-        else {
+        if let Err(error) = settings.resolve_output(self.library.directory()) {
+            self.show_notice(format!("{error:#}"), true);
+            self.export_settings = Some(settings);
             return;
-        };
+        }
         self.player.playing = false;
         self.player.reset();
         if let Err(error) = self.export.start(
             ctx,
             tools,
             self.timeline.tracks().to_vec(),
-            path,
+            settings,
             self.canvas_format,
             self.background.clone(),
         ) {
@@ -491,6 +494,416 @@ impl Workspace {
         }
     }
 
+    fn export_panel(&mut self, ctx: &egui::Context) {
+        let Some(mut settings) = self.export_settings.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut start = false;
+        let mut cancel = false;
+        let locale = Locale::from_context(ctx);
+        let colors = ui_theme::palette(ctx);
+        let preview_texture = self.player.texture().cloned();
+        let preview_size = self.player.texture_composition_size();
+        let output_directory = self.library.directory().to_owned();
+        let content = ctx.content_rect();
+
+        egui::Area::new(egui::Id::new("export-settings-backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(content.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_min_size(content.size());
+                ui.painter().rect_filled(
+                    ui.max_rect(),
+                    0.0,
+                    egui::Color32::from_black_alpha(if ctx.theme() == egui::Theme::Dark {
+                        150
+                    } else {
+                        82
+                    }),
+                );
+                ui.allocate_response(content.size(), egui::Sense::click_and_drag());
+            });
+
+        egui::Window::new(locale.text(key::EXPORT_SETTINGS))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .title_bar(true)
+            .default_pos(content.center() - egui::vec2(430.0, 260.0))
+            .default_width(860.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(colors.surface)
+                    .stroke(egui::Stroke::new(1.0, colors.border))
+                    .corner_radius(14)
+                    .inner_margin(egui::Margin::symmetric(16, 14)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_size(egui::vec2(820.0, 500.0));
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+                let section = |ui: &mut egui::Ui, title: &str| {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(title).size(12.0).strong().color(colors.text));
+                    ui.separator();
+                };
+                let field_label = |ui: &mut egui::Ui, label: &str| {
+                    ui.label(RichText::new(label).size(11.0).color(colors.muted));
+                };
+
+                ui.columns(2, |columns| {
+                    let (left_column, right_column) = columns.split_at_mut(1);
+                    let preview_ui = &mut left_column[0];
+                    let settings_ui = &mut right_column[0];
+                    preview_ui.set_min_width(350.0);
+                    settings_ui.set_min_width(430.0);
+
+                    section(preview_ui, locale.text(key::EXPORT_PREVIEW));
+                    egui::Frame::new()
+                        .fill(colors.field)
+                        .stroke(egui::Stroke::new(1.0, colors.border))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::same(8))
+                        .show(preview_ui, |ui| {
+                            let max_size = egui::vec2(340.0, 340.0);
+                            let (source_width, source_height) = preview_size.unwrap_or((16, 9));
+                            let scale = f32::min(
+                                max_size.x / source_width.max(1) as f32,
+                                max_size.y / source_height.max(1) as f32,
+                            );
+                            let image_size = egui::vec2(
+                                source_width as f32 * scale,
+                                source_height as f32 * scale,
+                            );
+                            ui.allocate_ui_with_layout(
+                                max_size,
+                                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                                |ui| {
+                                    if let Some(texture) = &preview_texture {
+                                        ui.add(
+                                            egui::Image::new((texture.id(), image_size))
+                                                .fit_to_exact_size(image_size)
+                                                .corner_radius(6),
+                                        );
+                                    } else {
+                                        ui.label(
+                                            RichText::new(locale.text(key::PREVIEW))
+                                                .size(12.0)
+                                                .color(colors.muted),
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                    preview_ui.add_space(8.0);
+                    preview_ui.label(
+                        RichText::new("当前时间线预览")
+                            .size(11.0)
+                            .color(colors.muted),
+                    );
+
+                    settings_ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("export-settings-scroll")
+                            .max_height(405.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                section(ui, locale.text(key::EXPORT_OUTPUT));
+                                egui::Frame::new()
+                                    .fill(colors.field)
+                                    .stroke(egui::Stroke::new(1.0, colors.border))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(locale.text(key::EXPORT_TITLE))
+                                                    .size(11.0)
+                                                    .color(colors.muted),
+                                            );
+                                            let changed = ui
+                                                .add_sized(
+                                                    egui::vec2(ui.available_width(), 28.0),
+                                                    egui::TextEdit::singleline(&mut settings.title),
+                                                )
+                                                .changed();
+                                            if changed {
+                                                settings.title = settings
+                                                    .title
+                                                    .chars()
+                                                    .map(|character| {
+                                                        if r#"<>:"/\|?*"#.contains(character) {
+                                                            '_'
+                                                        } else {
+                                                            character
+                                                        }
+                                                    })
+                                                    .collect();
+                                                if settings.title.trim().is_empty() {
+                                                    settings.title =
+                                                        format!("{}-剪辑", PRODUCT_NAME);
+                                                }
+                                                settings.output_text = output_directory
+                                                    .join(format!("{}.mp4", settings.title.trim()))
+                                                    .to_string_lossy()
+                                                    .into_owned();
+                                            }
+                                        });
+                                        ui.add_sized(
+                                            egui::vec2(ui.available_width(), 32.0),
+                                            egui::TextEdit::singleline(&mut settings.output_text)
+                                                .hint_text(locale.text(key::EXPORT_PATH_HINT)),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(locale.text(key::EXPORT_PATH_HINT))
+                                                .size(10.0)
+                                                .color(colors.muted),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(locale.text(key::EXPORT_TIMELINE))
+                                                    .size(11.0)
+                                                    .color(colors.muted),
+                                            );
+                                            ui.add_enabled(
+                                                false,
+                                                egui::Button::new(
+                                                    locale.text(key::EXPORT_MAIN_TIMELINE),
+                                                ),
+                                            );
+                                        });
+                                    });
+
+                                section(ui, "视频");
+                                egui::Frame::new()
+                                    .fill(colors.field)
+                                    .stroke(egui::Stroke::new(1.0, colors.border))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        egui::Grid::new("export-video-grid")
+                                            .num_columns(2)
+                                            .spacing(egui::vec2(14.0, 8.0))
+                                            .show(ui, |ui| {
+                                                field_label(ui, locale.text(key::EXPORT_FORMAT));
+                                                ui.add_sized(
+                                                    egui::vec2(190.0, 28.0),
+                                                    egui::Button::new(locale.text(key::EXPORT_MP4)),
+                                                );
+                                                ui.end_row();
+
+                                                field_label(ui, "FPS");
+                                                ui.add_sized(
+                                                    egui::vec2(190.0, 28.0),
+                                                    egui::Button::new(format!(
+                                                        "{} fps",
+                                                        settings.fps
+                                                    )),
+                                                );
+                                                ui.end_row();
+
+                                                field_label(
+                                                    ui,
+                                                    locale.text(key::EXPORT_RESOLUTION),
+                                                );
+                                                egui::ComboBox::from_id_salt("export-resolution")
+                                                    .width(190.0)
+                                                    .selected_text(match settings.resolution {
+                                                        ExportResolution::Canvas => locale
+                                                            .text(key::EXPORT_RESOLUTION_CANVAS),
+                                                        ExportResolution::Hd => {
+                                                            locale.text(key::EXPORT_RESOLUTION_720)
+                                                        }
+                                                        ExportResolution::FullHd => {
+                                                            locale.text(key::EXPORT_RESOLUTION_1080)
+                                                        }
+                                                        ExportResolution::UltraHd => {
+                                                            locale.text(key::EXPORT_RESOLUTION_4K)
+                                                        }
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut settings.resolution,
+                                                            ExportResolution::Canvas,
+                                                            locale.text(
+                                                                key::EXPORT_RESOLUTION_CANVAS,
+                                                            ),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut settings.resolution,
+                                                            ExportResolution::Hd,
+                                                            locale.text(key::EXPORT_RESOLUTION_720),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut settings.resolution,
+                                                            ExportResolution::FullHd,
+                                                            locale
+                                                                .text(key::EXPORT_RESOLUTION_1080),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut settings.resolution,
+                                                            ExportResolution::UltraHd,
+                                                            locale.text(key::EXPORT_RESOLUTION_4K),
+                                                        );
+                                                    });
+                                                ui.end_row();
+
+                                                field_label(ui, locale.text(key::EXPORT_QUALITY));
+                                                egui::ComboBox::from_id_salt("export-quality")
+                                                    .width(190.0)
+                                                    .selected_text(match settings.quality {
+                                                        ExportQuality::High => {
+                                                            locale.text(key::EXPORT_QUALITY_HIGH)
+                                                        }
+                                                        ExportQuality::Standard => locale
+                                                            .text(key::EXPORT_QUALITY_STANDARD),
+                                                        ExportQuality::Small => {
+                                                            locale.text(key::EXPORT_QUALITY_SMALL)
+                                                        }
+                                                    })
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut settings.quality,
+                                                            ExportQuality::High,
+                                                            locale.text(key::EXPORT_QUALITY_HIGH),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut settings.quality,
+                                                            ExportQuality::Standard,
+                                                            locale
+                                                                .text(key::EXPORT_QUALITY_STANDARD),
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut settings.quality,
+                                                            ExportQuality::Small,
+                                                            locale.text(key::EXPORT_QUALITY_SMALL),
+                                                        );
+                                                    });
+                                                ui.end_row();
+
+                                                field_label(ui, locale.text(key::EXPORT_ENCODER));
+                                                ui.add_enabled(
+                                                    false,
+                                                    egui::Button::new(
+                                                        locale.text(key::EXPORT_AUTO),
+                                                    ),
+                                                );
+                                                ui.end_row();
+                                            });
+                                    });
+
+                                section(ui, "音频与背景");
+                                egui::Frame::new()
+                                    .fill(colors.field)
+                                    .stroke(egui::Stroke::new(1.0, colors.border))
+                                    .corner_radius(8)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut settings.audio,
+                                                locale.text(key::EXPORT_AUDIO),
+                                            );
+                                            ui.add_enabled_ui(settings.audio, |ui| {
+                                                ui.label(
+                                                    RichText::new(
+                                                        locale.text(key::EXPORT_AUDIO_BITRATE),
+                                                    )
+                                                    .size(11.0)
+                                                    .color(colors.muted),
+                                                );
+                                                egui::ComboBox::from_id_salt(
+                                                    "export-audio-bitrate",
+                                                )
+                                                .width(120.0)
+                                                .selected_text(format!(
+                                                    "{} kbps",
+                                                    settings.audio_bitrate
+                                                ))
+                                                .show_ui(ui, |ui| {
+                                                    for bitrate in [128, 192, 256] {
+                                                        ui.selectable_value(
+                                                            &mut settings.audio_bitrate,
+                                                            bitrate,
+                                                            format!("{bitrate} kbps"),
+                                                        );
+                                                    }
+                                                });
+                                            });
+                                        });
+                                        ui.checkbox(
+                                            &mut settings.include_background,
+                                            locale.text(key::EXPORT_BACKGROUND),
+                                        );
+                                        ui.checkbox(
+                                            &mut settings.include_subtitles,
+                                            locale.text(key::EXPORT_SUBTITLES),
+                                        );
+                                    });
+                            });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            let duration = layout::time(self.duration());
+                            let video_mbps = match settings.quality {
+                                ExportQuality::High => 12.0,
+                                ExportQuality::Standard => 8.0,
+                                ExportQuality::Small => 5.0,
+                            };
+                            let audio_mbps = if settings.audio {
+                                settings.audio_bitrate as f32 / 1000.0
+                            } else {
+                                0.0
+                            };
+                            let size = self.duration() as f32 / 1_000_000.0
+                                * (video_mbps + audio_mbps)
+                                / 8.0;
+                            ui.label(
+                                RichText::new(locale.format(
+                                    key::EXPORT_ESTIMATE,
+                                    &[("duration", &duration), ("size", &format!("{size:.1} MB"))],
+                                ))
+                                .size(10.0)
+                                .color(colors.muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add_sized(
+                                            egui::vec2(108.0, 32.0),
+                                            egui::Button::new(locale.text(key::CANCEL))
+                                                .fill(colors.control),
+                                        )
+                                        .clicked()
+                                    {
+                                        cancel = true;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            !self.export.running(),
+                                            egui::Button::new(locale.text(key::EXPORT_START))
+                                                .fill(colors.accent_fill)
+                                                .min_size(egui::vec2(108.0, 32.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        start = true;
+                                    }
+                                },
+                            );
+                        });
+                    });
+                });
+            });
+        if start {
+            self.start_export(ctx, settings);
+        } else if !cancel && open {
+            self.export_settings = Some(settings);
+        }
+    }
     fn header_actions(&mut self, ui: &mut egui::Ui, docking: &mut DockState) -> bool {
         ui.allocate_ui_with_layout(
             egui::vec2(68.0, 32.0),
@@ -690,16 +1103,19 @@ impl Workspace {
         let old_position = self.position;
         let old_revision = self.timeline.revision();
         let old_selection = self.selected_clip;
-        let insert_track = self.library.selected_path().and_then(|path| {
-            let scope = if self.feature_tab == FeatureTab::Audio && self.library.is_audio(path) {
+        let selected_path = self.library.selected_path();
+        let selected_scope = selected_path.map(|path| {
+            if self.feature_tab == FeatureTab::Audio && self.library.is_audio(path) {
                 MaterialScope::Audio
             } else {
                 MaterialScope::All
-            };
-            self.active_media_track(path, scope)
+            }
         });
+        let insert_track = selected_path
+            .zip(selected_scope)
+            .and_then(|(path, scope)| self.active_media_track(path, scope));
         let add_enabled =
-            self.tools.is_some() && insert_track.is_some() && self.pending_additions.is_empty();
+            self.tools.is_some() && selected_path.is_some() && self.pending_additions.is_empty();
         let mut position = if self.timeline.is_empty() {
             0
         } else {
@@ -715,15 +1131,21 @@ impl Workspace {
         if let Some(drop) = input.material_drop {
             self.queue_material(ui.ctx(), drop.path, drop.destination, Some(drop.at));
         } else if input.add_material
-            && let Some(path) = self.library.selected_path()
-            && let Some(track) = insert_track
+            && let Some(path) = selected_path
+            && let Some(scope) = selected_scope
         {
-            self.queue_material(
-                ui.ctx(),
-                path.to_owned(),
-                TrackDestination::Existing(track),
-                None,
-            );
+            let destination = insert_track.map(TrackDestination::Existing).or_else(|| {
+                let info = self.library.info(path)?;
+                let kind = if scope == MaterialScope::Audio || (!info.has_video && info.has_audio) {
+                    TrackKind::Audio
+                } else {
+                    TrackKind::Video
+                };
+                Some(TrackDestination::New { kind, before: None })
+            });
+            if let Some(destination) = destination {
+                self.queue_material(ui.ctx(), path.to_owned(), destination, None);
+            }
         }
         if let Some(error) = input.error {
             self.show_notice(error, true);
@@ -965,6 +1387,7 @@ impl eframe::App for Workspace {
             self.player.toggle(&mut self.position, duration);
         }
         self.draw(ui);
+        self.export_panel(&ctx);
         self.sync_preview(&ctx);
     }
 }

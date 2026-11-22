@@ -178,7 +178,7 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use takeseam::editor_timeline::{PRIMARY_AUDIO, PRIMARY_VIDEO};
+    use takeseam::editor_timeline::{PRIMARY_AUDIO, PRIMARY_VIDEO, Timeline};
 
     #[test]
     fn narration_keeps_its_start_without_displacing_existing_audio() {
@@ -190,6 +190,7 @@ mod tests {
             egui::TextureOptions::NEAREST,
         );
         let mut workspace = Workspace::new(&ctx, logo, directory.path().into());
+        workspace.timeline = Timeline::default();
         workspace
             .timeline
             .insert_media_on_track(PRIMARY_VIDEO, "screen.mp4".into(), 5_000_000, 0)

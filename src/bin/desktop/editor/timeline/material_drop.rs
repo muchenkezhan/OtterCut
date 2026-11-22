@@ -60,7 +60,10 @@ pub(super) fn interact(
         return Ok(None);
     };
     let gap = TrackGap::at(target.rows, timeline, pointer);
-    let destination = if let Some(gap) = gap {
+    let destination = if timeline.is_empty() {
+        let kind = empty_timeline_kind(&asset);
+        Some(TrackDestination::New { kind, before: None })
+    } else if let Some(gap) = gap {
         let prefer_audio =
             asset.has_audio == Some(true) && (asset.has_video == Some(false) || pointer.y > gap.y);
         let order = if prefer_audio {
@@ -108,8 +111,8 @@ pub(super) fn interact(
         );
     }
     ui.ctx().set_cursor_icon(CursorIcon::Copy);
-    if let (Some(gap), TrackDestination::New { kind, .. }) = (gap, destination) {
-        gap.paint_target(painter, view, at, kind, target.rows, timeline);
+    if let (Some(gap), TrackDestination::New { kind: _, .. }) = (gap, destination) {
+        gap.paint_target(painter, view, at, target.rows);
     } else if let TrackDestination::Existing(id) = destination
         && let Some(index) = timeline.tracks().iter().position(|row| row.id == id)
     {
@@ -131,6 +134,14 @@ fn fits(kind: TrackKind, asset: &DraggedAsset) -> bool {
         TrackKind::Text | TrackKind::Caption => false,
         TrackKind::Video => asset.has_video != Some(false),
         TrackKind::Audio => asset.has_audio != Some(false),
+    }
+}
+
+fn empty_timeline_kind(asset: &DraggedAsset) -> TrackKind {
+    if asset.has_video != Some(false) {
+        TrackKind::Video
+    } else {
+        TrackKind::Audio
     }
 }
 
@@ -189,4 +200,31 @@ fn paint(
         row.bottom().clamp(rows.top(), rows.bottom()),
         &colors,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_timeline_prefers_video_for_av_media() {
+        let asset = DraggedAsset {
+            path: "screen.mp4".into(),
+            duration_us: Some(1_000_000),
+            has_video: Some(true),
+            has_audio: Some(true),
+        };
+        assert_eq!(empty_timeline_kind(&asset), TrackKind::Video);
+    }
+
+    #[test]
+    fn empty_timeline_uses_audio_for_audio_only_media() {
+        let asset = DraggedAsset {
+            path: "voice.wav".into(),
+            duration_us: Some(1_000_000),
+            has_video: Some(false),
+            has_audio: Some(true),
+        };
+        assert_eq!(empty_timeline_kind(&asset), TrackKind::Audio);
+    }
 }

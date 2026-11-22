@@ -256,7 +256,6 @@ impl Timeline {
     }
 
     pub fn from_tracks(mut tracks: Vec<Track>) -> Result<Self, TimelineError> {
-        tracks.sort_by_key(|track| track.kind.stack_order());
         for track in &mut tracks {
             track.clips.sort_unstable_by_key(|clip| clip.start);
         }
@@ -336,8 +335,8 @@ impl Timeline {
         self.add_track_before(kind, None)
     }
 
-    /// Inserts an empty track before an existing track, within its group.
-    /// With no anchor, a visual track goes first in its group and an audio track goes last.
+    /// Inserts an empty track before an existing track.
+    /// With no anchor, the track is appended after the current tracks.
     pub fn add_track_before(
         &mut self,
         kind: TrackKind,
@@ -347,7 +346,7 @@ impl Timeline {
         Ok(id)
     }
 
-    /// Inserts an empty track after an existing track, within its group.
+    /// Inserts an empty track after an existing track.
     pub fn add_track_after(
         &mut self,
         kind: TrackKind,
@@ -378,14 +377,6 @@ impl Timeline {
         insertion: usize,
         populate: impl FnOnce(&mut Track, &mut [Track], &mut u64) -> Result<T, TimelineError>,
     ) -> Result<(TrackId, T), TimelineError> {
-        let rank = kind.stack_order();
-        let previous = insertion.checked_sub(1).and_then(|i| self.tracks.get(i));
-        let next = self.tracks.get(insertion);
-        if previous.is_some_and(|track| track.kind.stack_order() > rank)
-            || next.is_some_and(|track| track.kind.stack_order() < rank)
-        {
-            return Err(TimelineError::IncompatibleTrack);
-        }
         let mut last_track_id = self.last_track_id;
         let id = allocate_track_id(&mut last_track_id)?;
         let result = self.edit(|tracks, last_id| {
@@ -920,12 +911,8 @@ fn validate(tracks: &[Track]) -> Result<(), TimelineError> {
     Ok(())
 }
 
-fn default_track_insertion(tracks: &[Track], kind: TrackKind) -> usize {
-    if kind == TrackKind::Audio {
-        tracks.len()
-    } else {
-        tracks.partition_point(|track| track.kind.stack_order() < kind.stack_order())
-    }
+fn default_track_insertion(tracks: &[Track], _kind: TrackKind) -> usize {
+    tracks.len()
 }
 
 fn allocate_track_id(last_id: &mut TrackId) -> Result<TrackId, TimelineError> {

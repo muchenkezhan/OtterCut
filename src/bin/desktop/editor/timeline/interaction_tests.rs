@@ -547,7 +547,7 @@ fn dropping_a_clip_on_the_upper_band_creates_a_track_even_when_rows_overflow() {
         access
             .nodes
             .iter()
-            .all(|(_, node)| node.label() != Some("拖到这里新建音频轨"))
+            .all(|(_, node)| node.label() != Some("拖入素材建立音频轨"))
     );
     let position = |label| {
         let bounds = access
@@ -562,7 +562,7 @@ fn dropping_a_clip_on_the_upper_band_creates_a_track_even_when_rows_overflow() {
         pos2(TRACK_HEADER + 38.0, ((bounds.y0 + bounds.y1) * 0.5) as f32)
     };
     let origin = position("选中第1条视频轨");
-    let to = position("拖到这里新建视频轨");
+    let to = position("拖入素材建立视频轨");
     let button = |pos, pressed| Event::PointerButton {
         pos,
         button: PointerButton::Primary,
@@ -669,7 +669,7 @@ fn trailing_blank_space_targets_a_new_audio_track() {
     assert!(TrackGap::at(rows, &timeline, pos2(200.0, last_row_bottom - 5.0)).is_none());
     let gap = TrackGap::at(rows, &timeline, pos2(200.0, last_row_bottom + 8.0)).unwrap();
     assert!(gap.allows(TrackKind::Audio));
-    assert!(!gap.allows(TrackKind::Video));
+    assert!(gap.allows(TrackKind::Video));
     assert!(gap.before.is_none());
     assert!(gap.y > last_row_bottom);
 }
@@ -716,10 +716,10 @@ fn track_end_drop_targets_scroll_with_the_rows() {
 }
 
 #[test]
-fn overlay_rows_keep_video_insertions_at_the_video_boundary() {
+fn track_gaps_allow_any_media_kind_in_the_existing_order() {
     let mut timeline = Timeline::default();
-    let caption = timeline.add_track(TrackKind::Caption).unwrap();
-    let title = timeline.add_track(TrackKind::Text).unwrap();
+    let _caption = timeline.add_track(TrackKind::Caption).unwrap();
+    let _title = timeline.add_track(TrackKind::Text).unwrap();
     let boundaries = Rows::measure(&timeline);
     let rows = Rows {
         area: Rect::from_min_size(pos2(0.0, 60.0), vec2(900.0, TRACK_HEIGHT * 5.0)),
@@ -729,19 +729,16 @@ fn overlay_rows_keep_video_insertions_at_the_video_boundary() {
     };
     assert_eq!(
         rows.at(&timeline, rows.boundary(1) - 6.0).unwrap().id,
-        title
+        timeline.tracks()[0].id
     );
     assert_eq!(
         rows.at(&timeline, rows.boundary(1) + 6.0).unwrap().id,
-        caption
+        timeline.tracks()[1].id
     );
-    let above_caption = TrackGap::at(rows, &timeline, pos2(200.0, rows.boundary(1))).unwrap();
-    assert!(!above_caption.allows(TrackKind::Video));
-    let above_video = TrackGap::at(rows, &timeline, pos2(200.0, rows.boundary(2))).unwrap();
-    assert!(above_video.allows(TrackKind::Caption));
-    assert!(above_video.allows(TrackKind::Video));
-    assert!(!above_video.allows(TrackKind::Audio));
-    assert_eq!(above_video.before, Some(timeline.tracks()[2].id));
+    let gap = TrackGap::at(rows, &timeline, pos2(200.0, rows.boundary(1))).unwrap();
+    assert!(gap.allows(TrackKind::Video));
+    assert!(gap.allows(TrackKind::Audio));
+    assert_eq!(gap.before, Some(timeline.tracks()[1].id));
 }
 
 #[test]
