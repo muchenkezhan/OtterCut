@@ -251,7 +251,7 @@ impl Workspace {
         }
     }
 
-    fn select_overlay(&mut self, track: TrackId, id: u64, at: u64) {
+    pub(super) fn select_overlay(&mut self, track: TrackId, id: u64, at: u64) {
         self.selected_clip = Some(id);
         self.position = at;
         self.timeline_view.reveal_added_track(track);

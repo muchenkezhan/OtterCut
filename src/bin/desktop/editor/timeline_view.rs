@@ -78,6 +78,7 @@ pub struct TimelineView {
     volume_changed: bool,
     volume_preview: Option<(u64, i16)>,
     cursor_markers: Vec<u64>,
+    recognize_audio_track: Option<TrackId>,
 }
 
 pub(super) struct TimelineInput {
@@ -87,6 +88,7 @@ pub(super) struct TimelineInput {
     pub material_drop: Option<MaterialDrop>,
     pub volume_changed: bool,
     pub volume_preview: Option<(u64, i16)>,
+    pub recognize_audio_track: Option<TrackId>,
 }
 
 pub(super) struct MaterialDrop {
@@ -157,6 +159,7 @@ impl TimelineView {
     ) -> TimelineInput {
         self.volume_changed = false;
         self.volume_preview = None;
+        self.recognize_audio_track = None;
         normalize_selection(timeline, playhead, selected);
         self.marquee.prune(timeline, *selected);
         if let Some(track) = selected.and_then(|id| timeline.track_for_clip(id)) {
@@ -226,6 +229,7 @@ impl TimelineView {
             material_drop,
             volume_changed: self.volume_changed,
             volume_preview: self.volume_preview,
+            recognize_audio_track: self.recognize_audio_track,
         }
     }
 

@@ -357,6 +357,30 @@ impl Timeline {
         Ok(id)
     }
 
+    /// Moves an existing track before an optional anchor while keeping one undo step.
+    pub fn move_track_before(
+        &mut self,
+        id: TrackId,
+        before: Option<TrackId>,
+    ) -> Result<(), TimelineError> {
+        let from = self.track_index(id)?;
+        let mut insertion = before
+            .map(|anchor| self.track_index(anchor))
+            .transpose()?
+            .unwrap_or(self.tracks.len());
+        if from == insertion || from + 1 == insertion {
+            return Ok(());
+        }
+        self.edit(|tracks, _| {
+            let track = tracks.remove(from);
+            if from < insertion {
+                insertion = insertion.saturating_sub(1);
+            }
+            tracks.insert(insertion.min(tracks.len()), track);
+            Ok(())
+        })
+    }
+
     fn edit_new_track<T>(
         &mut self,
         kind: TrackKind,

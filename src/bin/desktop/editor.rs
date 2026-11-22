@@ -69,6 +69,8 @@ mod preview_viewport;
 mod project;
 #[path = "editor/subrip.rs"]
 mod subrip;
+#[path = "editor/speech.rs"]
+mod speech;
 #[path = "editor/subtitle_canvas.rs"]
 mod subtitle_canvas;
 #[path = "editor/text_panel.rs"]

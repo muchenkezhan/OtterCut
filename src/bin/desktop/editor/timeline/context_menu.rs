@@ -37,6 +37,7 @@ pub(super) enum Action {
     InsertTrackAfter(TrackKind, TrackId),
     RemoveTrack(TrackId),
     SetOutput(TrackId, bool),
+    RecognizeAudio(TrackId),
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +199,9 @@ impl Target {
                 if track.kind == TrackKind::Audio && clip.volume_db_tenths != 0 {
                     item("重置音量", true, Action::ResetVolume(id));
                 }
+                if matches!(track.kind, TrackKind::Audio | TrackKind::Video) {
+                    item("识别语音并生成字幕", true, Action::RecognizeAudio(track.id));
+                }
             }
             Self::Header(id) => {
                 let track = timeline.track(id)?;
@@ -212,6 +216,9 @@ impl Target {
                     Action::InsertTrackAfter(track.kind, id),
                 );
                 item("删除轨道", true, Action::RemoveTrack(id));
+                if matches!(track.kind, TrackKind::Audio | TrackKind::Video) {
+                    item("识别语音并生成字幕", true, Action::RecognizeAudio(id));
+                }
                 let label = match (track.kind, track.enabled) {
                     (TrackKind::Video, true) => "关闭视频轨输出",
                     (TrackKind::Video, false) => "开启视频轨输出",
@@ -354,6 +361,9 @@ impl TimelineView {
                 }
             }
             Action::SetOutput(id, enabled) => timeline.set_track_enabled(id, enabled)?,
+            Action::RecognizeAudio(id) => {
+                self.recognize_audio_track = Some(id);
+            }
         }
         Ok(())
     }

@@ -5,7 +5,9 @@ use std::time::SystemTime;
 
 use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::PRODUCT_NAME;
-use takeseam::editor_timeline::{PRIMARY_AUDIO, PRIMARY_VIDEO, Timeline, TrackId, TrackKind};
+use takeseam::editor_timeline::{
+    OverlayText, PRIMARY_AUDIO, PRIMARY_VIDEO, TextStyle, Timeline, TrackId, TrackKind,
+};
 
 use super::asset_cards::{self, MaterialAction};
 use super::asset_info;
@@ -24,6 +26,7 @@ use super::media::{MediaInfo, MediaTools};
 use super::player::{Player, Span};
 use super::preview_viewport::PreviewViewport;
 use super::project;
+use super::speech::{SpeechCue, SpeechJob};
 use super::subtitle_canvas::SubtitleCanvas;
 use super::text_panel::TextInspector;
 use super::thumbnails::Thumbnails;
@@ -80,11 +83,13 @@ pub(super) struct Workspace {
     focused: bool,
     closing_after_export: bool,
     home: bool,
+    speech_job: Option<SpeechJob>,
 }
 
 struct Notice {
     text: String,
     warning: bool,
+    loading: bool,
 }
 
 struct MaterialAddition {
@@ -147,6 +152,7 @@ impl Workspace {
             focused: false,
             closing_after_export: false,
             home: !cfg!(test),
+            speech_job: None,
         }
     }
 
@@ -174,6 +180,15 @@ impl Workspace {
         self.notice = Some(Notice {
             text: text.into(),
             warning,
+            loading: false,
+        });
+    }
+
+    fn show_loading_notice(&mut self, text: impl Into<String>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            warning: false,
+            loading: true,
         });
     }
 
@@ -1159,6 +1174,7 @@ impl Workspace {
             &mut self.selected_clip,
             add_enabled,
         );
+        let recognize_audio_track = input.recognize_audio_track;
         let volume_changed = input.volume_changed;
         self.volume_preview = input.volume_preview;
         if let Some(drop) = input.material_drop {
@@ -1179,6 +1195,9 @@ impl Workspace {
             if let Some(destination) = destination {
                 self.queue_material(ui.ctx(), path.to_owned(), destination, None);
             }
+        }
+        if let Some(track) = recognize_audio_track {
+            self.start_speech(track);
         }
         if let Some(error) = input.error {
             self.show_notice(error, true);
@@ -1268,11 +1287,11 @@ impl Workspace {
             .or(self.player.error())
             .or(self.player.audio_error());
         if let Some(fault) = fault {
-            layout::status(ui, fault, true);
+            layout::status(ui, fault, true, false);
         } else if !self.pending_additions.is_empty() {
-            layout::status(ui, "正在读取素材…", false);
+            layout::status(ui, "正在读取素材…", false, true);
         } else if let Some(notice) = &self.notice {
-            layout::status(ui, &notice.text, notice.warning);
+            layout::status(ui, &notice.text, notice.warning, notice.loading);
         }
         let caption = if !self.timeline.is_empty() {
             String::from("时间线预览")
@@ -1676,6 +1695,93 @@ impl Workspace {
             .map(|clip| clip.path.clone())
     }
 
+    fn start_speech(&mut self, track_id: TrackId) {
+        if self.speech_job.is_some() {
+            self.show_notice("语音识别正在进行中", false);
+            return;
+        }
+        let Some(tools) = self.tools.clone() else {
+            self.show_notice("FFmpeg 不可用，无法进行语音识别", true);
+            return;
+        };
+        let Some(track) = self.timeline.track(track_id).cloned() else {
+            self.show_notice("音频轨道已不存在", true);
+            return;
+        };
+        match SpeechJob::start(tools, track) {
+            Ok(job) => {
+                self.speech_job = Some(job);
+                self.show_loading_notice("正在使用本地模型识别语音…");
+            }
+            Err(error) => self.show_notice(format!("{error:#}"), true),
+        }
+    }
+
+    fn poll_speech(&mut self, ctx: &egui::Context) {
+        let Some(job) = &mut self.speech_job else {
+            return;
+        };
+        let Some(result) = job.poll() else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+            return;
+        };
+        self.speech_job = None;
+        let (track_id, result) = result;
+        match result {
+            Ok(cues) => self.insert_speech_cues(track_id, cues),
+            Err(error) => self.show_notice(format!("{error:#}"), true),
+        }
+    }
+
+    fn insert_speech_cues(&mut self, source_track: TrackId, cues: Vec<SpeechCue>) {
+        let previous_caption_tracks = self
+            .timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Caption)
+            .map(|track| track.id)
+            .collect::<Vec<_>>();
+        let segments = cues
+            .into_iter()
+            .map(|cue| {
+                (
+                    cue.start_us,
+                    cue.duration_us,
+                    OverlayText {
+                        content: cue.text,
+                        style: TextStyle::default(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if segments.is_empty() {
+            self.show_notice("没有识别到语音内容", true);
+            return;
+        }
+        match self
+            .timeline
+            .insert_text_batch(TrackKind::Caption, segments)
+        {
+            Ok(added) => {
+                for track in previous_caption_tracks {
+                    let _ = self.timeline.remove_track(track);
+                }
+                if let Some(&(track, id)) = added.first() {
+                    if self.timeline.track(source_track).is_some() {
+                        let _ = self.timeline.move_track_before(track, Some(source_track));
+                    }
+                    self.select_overlay(track, id, self.position);
+                }
+                if self.project.is_some() {
+                    self.save_project(false);
+                } else {
+                    self.show_notice(format!("已生成 {} 条字幕", added.len()), false);
+                }
+            }
+            Err(error) => self.show_notice(error.to_string(), true),
+        }
+    }
+
     fn new_project(&mut self, ctx: &egui::Context) {
         self.timeline = Timeline::from_tracks(Vec::new()).expect("empty timeline is valid");
         self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
@@ -1729,6 +1835,7 @@ impl eframe::App for Workspace {
         }
         self.focused = focused;
         self.library.poll();
+        self.poll_speech(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.narration.busy() {
                 self.feature_tab = FeatureTab::Audio;

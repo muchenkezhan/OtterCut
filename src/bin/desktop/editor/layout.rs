@@ -167,7 +167,7 @@ pub(super) fn export_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response 
     .inner
 }
 
-pub(super) fn status(ui: &mut egui::Ui, text: &str, warning: bool) {
+pub(super) fn status(ui: &mut egui::Ui, text: &str, warning: bool, loading: bool) {
     if text.is_empty() {
         return;
     }
@@ -182,6 +182,10 @@ pub(super) fn status(ui: &mut egui::Ui, text: &str, warning: bool) {
         .show_inside(ui, |ui| {
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let tone = if warning { colors.danger } else { colors.muted };
+                if loading {
+                    ui.add(egui::Spinner::new().size(12.0).color(tone));
+                    ui.add_space(6.0);
+                }
                 ui.add(egui::Label::new(RichText::new(text).size(11.0).color(tone)).truncate())
                     .on_hover_text(text);
             });
