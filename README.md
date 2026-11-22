@@ -5,8 +5,12 @@
 <h1 align="center">OtterCut</h1>
 
 <p align="center">
-  <strong>用 Rust 开发的开源录屏与视频剪辑工具，面向 Windows、macOS 和 Linux。</strong><br>
-  Windows 11 可从源码运行。macOS 与 Linux 提供移植预览代码。
+  <strong>从录屏到剪辑，一套工作流完成。</strong><br>
+  在同一个 Rust 原生应用里采集屏幕、整理素材、编辑时间线、生成字幕并导出视频。
+</p>
+
+<p align="center">
+  面向 Windows、macOS 和 Linux。Windows 11 可从源码运行，macOS 与 Linux 提供移植预览代码。
 </p>
 
 <p align="center">
@@ -14,6 +18,20 @@
   <a href="#平台支持"><img src="https://img.shields.io/badge/desktop-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-313A49?style=flat-square" alt="桌面目标平台 Windows、macOS 和 Linux"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-313A49?style=flat-square" alt="Apache-2.0 许可证"></a>
 </p>
+
+## 一体化工作流
+
+OtterCut 把录制和后期制作放在同一个工程里。录完屏后直接进入剪辑台，素材、时间线、字幕、画幅、动态背景和导出设置都围绕同一个项目保存。
+
+<p align="center">
+  <strong>录制来源 → 素材库 → 多轨时间线 → 字幕与画面处理 → 导出视频</strong>
+</p>
+
+- **录制**：选择屏幕或窗口，配置麦克风、摄像头和点击跟随效果。
+- **整理**：录制结果直接进入本地素材库，也可以继续导入已有的视频、图片和音频。
+- **剪辑**：在多轨时间线上完成修剪、分割、移动、吸附、框选和复制粘贴。
+- **完善**：调整字幕、画幅、动态背景和画面构图，识别语音时生成可继续编辑的字幕轨。
+- **交付**：在剪辑台内配置画质、分辨率、帧率、音频和背景后导出 MP4。
 
 <p align="center">
   <a href="#快速开始"><strong>快速开始</strong></a> ·
@@ -37,7 +55,7 @@
   <img src="docs/images/recorder.png" width="386" alt="OtterCut 浮动录制工具条，包含采集源、麦克风、录制和设备设置">
 </p>
 
-Windows 版浮动工具条可拖动，也可收进系统托盘。录前可预览屏幕或窗口，选择麦克风并测试电平。开启点击跟随后，画面会随点击位置平滑缩放。摄像头支持设备和画质选择，录像可保存为独立 MP4。
+Windows 版浮动工具条可拖动，也可收进系统托盘。录前可预览屏幕或窗口，选择麦克风并测试电平。鼠标轨迹和点击事件会随录屏一起记录，摄像头支持设备和画质选择，录像可保存为独立 MP4。
 
 ### 剪辑与构图
 
@@ -64,17 +82,48 @@ Windows 版浮动工具条可拖动，也可收进系统托盘。录前可预览
   </tr>
 </table>
 
+### 鼠标与点击跟随效果
+
+鼠标效果会在剪辑阶段实时生成，不会把效果写死在原始视频里。录制时保存的鼠标轨迹和点击事件会作为独立的 `.cursor.json` 数据使用，打开工程后可以继续调整：
+
+- 设置效果的开始和结束时间，决定它在哪一段画面生效。
+- 调整鼠标大小、点击放大倍数和跟随平滑度。
+- 选择波纹、圆点或无点击反馈。
+- 在时间线查看点击标记，在预览和导出中保持相同的效果位置。
+
+### 动态背景效果
+
+动态背景用于补足画幅空白、衬托竖屏内容或统一项目视觉。剪辑台提供网格、网点、流星、光带、光幕、波纹和光晕等预设，可以调整速度、强度、方向和焦点。背景配方以 JSON 保存，支持从面板复制给 AI 修改，再导入工程继续使用。预览和导出共用同一份配方和时间位置。
+
+### 本地免费字幕识别
+
+OtterCut 支持使用本地语音识别组件把视频或音频轨道转换成字幕，不需要上传素材，也不依赖云端接口或按量付费。选择媒体轨道后打开右键菜单，点击「识别语音并生成字幕」，程序会提取音频、自动检测语言并按时间戳建立字幕轨道。
+
+- 识别结果保留原始语言，中文、英文和其他支持的语言都可以按检测结果生成。
+- 每条字幕会写入对应的开始时间和持续时间，最后一句会延伸到语音结束，方便继续调整。
+- 生成的字幕是时间线里的可编辑片段，可以修改文字、拖动位置、调整时长和统一样式。
+- 识别过程在后台运行，底部状态栏会显示加载进度，完成后工程自动保存。
+
+首次使用需要准备本地语音识别组件。组件放入 OtterCut 的本地应用数据目录后，程序会自动查找。识别速度取决于组件配置、处理器和显卡。
+
 ## 平台支持
 
-| 桌面平台 | 状态 | 录制方案与适配范围 |
+| 平台与架构 | 状态 | 录制方案与适配范围 |
 | --- | --- | --- |
-| Windows | **Windows 11 可从源码运行** | 使用 Windows Graphics Capture 录制屏幕与窗口，可剪辑并导出 MP4。 |
-| macOS | 移植预览，实机待验证 | macOS 15 及以上，Apple Silicon 优先。通过 [ScreenCaptureKit](https://developer.apple.com/documentation/screencapturekit/capturing-screen-content-in-macos) 的系统选择器录制屏幕或窗口，可开启默认麦克风。 |
-| Linux | 移植预览，实机待验证 | GNOME Wayland 优先。通过 [ScreenCast Portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html) 选择来源，以 PipeWire 和 GStreamer 保存 MP4。窗口录制取决于桌面环境的 Portal 后端。 |
+| Windows 11 x64 | **当前验证目标** | 使用 Windows Graphics Capture 录制屏幕与窗口，可剪辑并导出 MP4。 |
+| Windows 10 x64 | 目标支持，实机待验证 | 建议使用 1903（Build 18362）或更新版本。较新的 21H2、22H2 优先。 |
+| Windows 32 位 | 不支持 | 当前依赖、构建目标和录屏链路均按 64 位设计。 |
+| Windows ARM64 | 未验证 | 暂未提供 ARM64 构建和实机验收。 |
+| macOS arm64 | 移植预览，实机待验证 | macOS 15 及以上，使用 ScreenCaptureKit 系统选择器录制屏幕或窗口，可开启默认麦克风。 |
+| macOS x86_64（Intel） | 移植预览，实机待验证 | macOS 15 及以上，构建脚本支持 Intel 架构，录制链路仍需实机验收。 |
+| Linux x86_64 | 移植预览，实机待验证 | GNOME Wayland 优先，通过 ScreenCast Portal 选择来源，以 PipeWire 和 GStreamer 保存 MP4。 |
+| Linux ARM64 | 未验证 | 暂未提供 ARM64 的运行时和媒体插件验收。 |
+
+Windows 10/11 和 macOS 版本均为 64 位目标。Linux 的最低发行版版本取决于桌面环境、Portal、PipeWire 和 GStreamer 版本，首发验收基线为 GNOME Wayland x86_64。
 
 ## 快速开始
 
-### Windows 11
+### Windows 10/11 x64
 
 1. 安装 [Rust](https://rust-lang.org/tools/install/) 的 Windows MSVC 工具链，以及 [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio) 的「使用 C++ 的桌面开发」工作负载与 Windows SDK。
 2. 下载 [FFmpeg 的 Windows 构建](https://ffmpeg.org/download.html#build-windows)，将 `ffmpeg.exe` 和 `ffprobe.exe` 所在目录加入 `PATH`。画面文字和字幕需要支持 `libass` 的 FFmpeg 构建。
