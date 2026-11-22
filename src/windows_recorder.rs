@@ -23,9 +23,8 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use crate::camera::{CameraRecording, CameraSelection};
-use crate::click_follow::ClickTracker;
+use crate::click_follow::{ClickTracker, CursorTelemetry};
 use crate::microphone::Microphone;
-use crate::zoom_frames::ZoomFrames;
 
 const FRAME_RATE: u32 = 30;
 const FRAME_TICKS_PER_SECOND: i64 = 10_000_000;
@@ -157,6 +156,7 @@ pub struct SavedRecording {
     pub path: PathBuf,
     pub frames: u64,
     pub camera_path: Option<PathBuf>,
+    pub cursor_path: Option<PathBuf>,
     pub warning: Option<String>,
 }
 
@@ -197,9 +197,7 @@ pub fn record(
     let flags = RecordingFlags {
         path: staged_file.to_path_buf(),
         audio,
-        zoom: click_tracker
-            .as_ref()
-            .map(|tracker| ZoomFrames::new(tracker.sample_handle())),
+        cursor_telemetry: click_tracker.is_some(),
     };
     let control = match request.source {
         CaptureSource::Window(window) => start_capture(window, flags)?,
@@ -227,6 +225,7 @@ pub fn record(
             }
         },
     );
+    let telemetry = click_tracker.as_ref().map(ClickTracker::telemetry);
     if let Some(camera) = &mut camera {
         camera.request_stop();
     }
@@ -277,11 +276,12 @@ pub fn record(
             None
         }
     });
+    let cursor_path = write_cursor_telemetry(&output, telemetry)?;
     let mut warning = session
         .and(mic_result)
         .err()
         .map(|error| format!("{error:#}"))
-        .or_else(|| recording.zoom_warning.take());
+        ;
     if let Some(camera_warning) = camera_warning {
         warning = Some(match warning {
             Some(screen_warning) => format!("{screen_warning}。{camera_warning}"),
@@ -292,8 +292,23 @@ pub fn record(
         path: output,
         frames: recording.frames,
         camera_path,
+        cursor_path,
         warning,
     })
+}
+
+fn write_cursor_telemetry(
+    output: &std::path::Path,
+    telemetry: Option<CursorTelemetry>,
+) -> Result<Option<PathBuf>> {
+    let Some(telemetry) = telemetry.filter(|telemetry| !telemetry.samples.is_empty()) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(format!("{}.cursor.json", output.display()));
+    ensure!(!path.try_exists()?, "鼠标轨迹文件已存在（{}）", path.display());
+    let data = serde_json::to_vec_pretty(&telemetry).context("无法序列化鼠标轨迹")?;
+    fs::write(&path, data).context("无法保存鼠标轨迹文件")?;
+    Ok(Some(path))
 }
 
 fn find_window(title: &str) -> Result<Window> {
@@ -312,9 +327,14 @@ fn start_capture<T>(item: T, flags: RecordingFlags) -> Result<RecordingControl>
 where
     T: TryInto<GraphicsCaptureItemType> + Send + 'static,
 {
+    let cursor = if flags.cursor_telemetry {
+        CursorCaptureSettings::WithoutCursor
+    } else {
+        CursorCaptureSettings::Default
+    };
     let settings = Settings::new(
         item,
-        CursorCaptureSettings::Default,
+        cursor,
         DrawBorderSettings::Default,
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
@@ -340,6 +360,9 @@ fn wait_for_stop(
         if started.is_none() {
             let first_frame_at = callback.lock().first_frame_at;
             if let Some(first_frame_at) = first_frame_at {
+                if let Some(tracker) = &mut click_tracker {
+                    tracker.set_origin(first_frame_at);
+                }
                 if let Some(mic) = mic {
                     mic.start()?;
                     *started = Some(first_frame_at);
@@ -376,14 +399,13 @@ type RecordingControl = CaptureControl<Recording, VideoEncoderError>;
 struct RecordingFlags {
     path: PathBuf,
     audio: Option<(u16, u32)>,
-    zoom: Option<ZoomFrames>,
+    cursor_telemetry: bool,
 }
 
 struct Recording {
     flags: RecordingFlags,
     encoder: Option<VideoEncoder>,
     output_size: (u32, u32),
-    zoom_warning: Option<String>,
     first_timestamp: Option<i64>,
     first_frame_at: Option<Instant>,
     last_slot: i64,
@@ -415,7 +437,6 @@ impl GraphicsCaptureApiHandler for Recording {
             flags: context.flags,
             encoder: None,
             output_size: (0, 0),
-            zoom_warning: None,
             first_timestamp: None,
             first_frame_at: None,
             last_slot: -1,
@@ -443,20 +464,7 @@ impl GraphicsCaptureApiHandler for Recording {
             self.output_size = (width, height);
         }
         if let Some(encoder) = &mut self.encoder {
-            let zoom = match &mut self.flags.zoom {
-                Some(zoom) => zoom.render(frame, frame_received_at, self.output_size),
-                None => Ok(None),
-            };
-            match zoom {
-                Ok(Some(pixels)) => encoder.send_frame_buffer(pixels, timestamp)?,
-                Ok(None) => encoder.send_frame(frame)?,
-                Err(error) => {
-                    self.zoom_warning.get_or_insert_with(|| {
-                        format!("点击跟随处理失败，受影响的帧保留原画面（{error:#}）")
-                    });
-                    encoder.send_frame(frame)?;
-                }
-            }
+            encoder.send_frame(frame)?;
             self.first_frame_at.get_or_insert(frame_received_at);
             self.last_slot = slot;
             self.frames += 1;

@@ -77,6 +77,7 @@ pub struct TimelineView {
     context_menu: Option<ContextMenu>,
     volume_changed: bool,
     volume_preview: Option<(u64, i16)>,
+    cursor_markers: Vec<u64>,
 }
 
 pub(super) struct TimelineInput {
@@ -131,6 +132,10 @@ impl TimelineView {
     pub(super) fn reveal_added_track(&mut self, id: TrackId) {
         self.track = Some(id);
         self.reveal_track = Some(id);
+    }
+
+    pub(super) fn set_cursor_markers(&mut self, markers: Vec<u64>) {
+        self.cursor_markers = markers;
     }
 
     pub(super) fn selected_group(&self, primary: Option<u64>) -> &[u64] {
@@ -435,6 +440,7 @@ impl TimelineView {
         rows.offset = self.vertical_scroll;
         let time_painter = painter.with_clip_rect(content);
         paint_ruler(&time_painter, view, rows.area, background, &colors);
+        self.paint_cursor_markers(ui, &painter, view, rows, playhead);
         let (track_action, cut) = self.draw_rows(ui, &painter, timeline, selected, view, rows);
         self.marquee.paint(&time_painter, &colors);
         edge_drop::describe_edges(ui, rows);
@@ -533,6 +539,51 @@ impl TimelineView {
         }
         self.update_drag(ui, &painter, view, rows, timeline, *playhead)?;
         Ok(None)
+    }
+
+    fn paint_cursor_markers(
+        &self,
+        ui: &Ui,
+        painter: &egui::Painter,
+        view: Viewport,
+        rows: Rows,
+        playhead: &mut u64,
+    ) {
+        if self.cursor_markers.is_empty() {
+            return;
+        }
+        let colors = ui_theme::palette(ui.ctx());
+        let strip = rows.top_band().shrink2(vec2(8.0, 5.0));
+        if !strip.is_positive() {
+            return;
+        }
+        painter.rect_filled(strip, 5.0, colors.control.gamma_multiply(0.18));
+        painter.hline(
+            strip.x_range(),
+            strip.center().y,
+            Stroke::new(1.0, colors.accent.gamma_multiply(0.7)),
+        );
+        let response = ui.interact(
+            strip,
+            ui.id().with("cursor-effect-lane"),
+            egui::Sense::click(),
+        );
+        if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            *playhead = view.time_at(pointer.x).min(u64::MAX);
+        }
+        for &marker in &self.cursor_markers {
+            let x = view.x(marker);
+            if strip.x_range().contains(x) {
+                painter.circle_filled(pos2(x, strip.center().y), 3.0, colors.accent);
+                painter.vline(
+                    x,
+                    strip.top()..=rows.area.bottom(),
+                    Stroke::new(1.0, colors.accent.gamma_multiply(0.28)),
+                );
+            }
+        }
     }
 
     fn seek_on_canvas(&self, ui: &Ui, view: Viewport, duration: u64, playhead: &mut u64) {

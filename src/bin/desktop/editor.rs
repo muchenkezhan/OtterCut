@@ -35,6 +35,8 @@ mod background;
 mod background_panel;
 #[path = "editor/canvas_format.rs"]
 mod canvas_format;
+#[path = "editor/cursor_effect.rs"]
+mod cursor_effect;
 #[path = "editor/dock_model.rs"]
 mod dock_model;
 #[path = "editor/dock_presets.rs"]
@@ -279,7 +281,7 @@ pub fn launch(directory: PathBuf) -> eframe::Result {
             .with_title(&title)
             .with_decorations(!cfg!(windows))
             .with_has_shadow(true)
-            .with_inner_size([1240.0, 760.0])
+            .with_inner_size([1080.0, 680.0])
             .with_min_inner_size([760.0, 490.0])
             .with_icon(icon.clone()),
         centered: true,

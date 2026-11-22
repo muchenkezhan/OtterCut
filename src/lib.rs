@@ -35,7 +35,3 @@ pub mod platform;
 pub mod windows_preview;
 #[cfg(windows)]
 pub mod windows_recorder;
-#[cfg(windows)]
-mod zoom_follow;
-#[cfg(windows)]
-mod zoom_frames;

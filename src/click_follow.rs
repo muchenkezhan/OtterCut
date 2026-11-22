@@ -1,5 +1,6 @@
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
@@ -15,23 +16,30 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::windows_recorder::CaptureSource;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Click {
-    pub at: Instant,
-    pub position: [f32; 2],
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CursorTelemetry {
+    pub version: u32,
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<CursorSample>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct PointerSample {
-    pub position: Option<[f32; 2]>,
-    pub click: Option<Click>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CursorSample {
+    pub at_us: u64,
+    pub x: f32,
+    pub y: f32,
+    pub pressed: bool,
 }
 
 pub struct ClickTracker {
     source: CaptureSource,
     primary_button: i32,
     was_pressed: bool,
-    sample: Arc<Mutex<PointerSample>>,
+    origin: Instant,
+    width: u32,
+    height: u32,
+    samples: Vec<CursorSample>,
 }
 
 impl ClickTracker {
@@ -46,12 +54,19 @@ impl ClickTracker {
             source,
             primary_button,
             was_pressed: unsafe { GetAsyncKeyState(primary_button) } < 0,
-            sample: Arc::new(Mutex::new(PointerSample::default())),
+            origin: Instant::now(),
+            width: source_bounds(source)
+                .map(|bounds| (bounds.right - bounds.left).max(1) as u32)
+                .unwrap_or(1),
+            height: source_bounds(source)
+                .map(|bounds| (bounds.bottom - bounds.top).max(1) as u32)
+                .unwrap_or(1),
+            samples: Vec::new(),
         }
     }
 
-    pub fn sample_handle(&self) -> Arc<Mutex<PointerSample>> {
-        Arc::clone(&self.sample)
+    pub fn set_origin(&mut self, origin: Instant) {
+        self.origin = origin;
     }
 
     pub fn poll(&mut self) {
@@ -60,13 +75,25 @@ impl ClickTracker {
         self.was_pressed = pressed;
 
         let position = pointer_in_source(self.source);
-        let mut sample = self.sample.lock().unwrap_or_else(PoisonError::into_inner);
-        sample.position = position;
-        if clicked && let Some(position) = position {
-            sample.click = Some(Click {
-                at: Instant::now(),
-                position,
+        if let Some([x, y]) = position {
+            self.samples.push(CursorSample {
+                at_us: Instant::now()
+                .saturating_duration_since(self.origin)
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+                x,
+                y,
+                pressed: clicked,
             });
+        }
+    }
+
+    pub fn telemetry(&self) -> CursorTelemetry {
+        CursorTelemetry {
+            version: 1,
+            width: self.width,
+            height: self.height,
+            samples: self.samples.clone(),
         }
     }
 }

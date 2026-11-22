@@ -537,6 +537,8 @@ pub(super) struct PreviewPlan {
     pub black_canvas: bool,
     pub overlays: Overlays,
     pub excluded_overlay: Option<u64>,
+    pub cursor: Option<super::cursor_effect::CursorTelemetry>,
+    pub cursor_effect: super::cursor_effect::CursorEffect,
 }
 
 impl Preview {
@@ -587,6 +589,8 @@ impl Preview {
                 timeline_duration: plan.duration_us,
                 overlays: plan.overlays,
                 backdrop: plan.background,
+                cursor: plan.cursor,
+                cursor_effect: plan.cursor_effect,
                 decoder: session.video.clone(),
                 frames,
                 errors: session.errors_tx.clone(),
@@ -979,6 +983,8 @@ struct VideoDecode {
     timeline_duration: u64,
     overlays: Overlays,
     backdrop: super::background::BackgroundSettings,
+    cursor: Option<super::cursor_effect::CursorTelemetry>,
+    cursor_effect: super::cursor_effect::CursorEffect,
     decoder: Arc<Decoder>,
     frames: SyncSender<VideoFrame>,
     errors: mpsc::Sender<PreviewError>,
@@ -1114,6 +1120,27 @@ impl VideoDecode {
                     Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
                     Err(error) => return Err(error.into()),
                 }
+                let frame_time = self
+                    .timeline_from
+                    .saturating_add(count * USECS_PER_SEC / VIDEO_FPS);
+                if let Some(telemetry) = &self.cursor
+                    && let Some(sample) = telemetry.sample_at(
+                        frame_time,
+                    )
+                    && self.cursor_effect.contains(frame_time)
+                {
+                    render_cursor_overlay(
+                        &mut pixels,
+                        width as u32,
+                        height as u32,
+                        sample.x,
+                        sample.y,
+                        sample.pressed,
+                        self.cursor_effect.cursor_scale,
+                        self.cursor_effect.click_effect,
+                        telemetry.zoom_scale_at(frame_time, self.cursor_effect.zoom_scale),
+                    );
+                }
                 self.frames.send(VideoFrame {
                     time_us: count * USECS_PER_SEC / VIDEO_FPS,
                     pixels,
@@ -1124,4 +1151,148 @@ impl VideoDecode {
             Ok(count)
         })
     }
+}
+
+fn render_cursor_overlay(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+    pressed: bool,
+    scale: f32,
+    click_effect: super::cursor_effect::CursorClickEffect,
+    zoom_scale: f32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let point = (
+        x.clamp(0.0, 1.0) * width as f32,
+        y.clamp(0.0, 1.0) * height as f32,
+    );
+    if zoom_scale > 1.0 {
+        zoom_rgba_around_point(pixels, width, height, point, zoom_scale);
+    }
+    if pressed && click_effect != super::cursor_effect::CursorClickEffect::None {
+        let radius = 20.0 * scale;
+        let min_x = (point.0 - radius - 3.0).max(0.0) as u32;
+        let max_x = (point.0 + radius + 3.0).min(width as f32) as u32;
+        let min_y = (point.1 - radius - 3.0).max(0.0) as u32;
+        let max_y = (point.1 + radius + 3.0).min(height as f32) as u32;
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let distance = ((px as f32 + 0.5 - point.0).powi(2)
+                    + (py as f32 + 0.5 - point.1).powi(2))
+                .sqrt();
+                if click_effect == super::cursor_effect::CursorClickEffect::Ring
+                    && (distance - radius).abs() <= 2.5 * scale
+                    || click_effect == super::cursor_effect::CursorClickEffect::Dot
+                        && distance <= 5.0 * scale
+                {
+                    blend_rgba(pixels, width, height, px, py, [255, 150, 80, 255], 0.8);
+                }
+            }
+        }
+    }
+    let size = 22.0 * scale;
+    let points = [
+        (0.0, 0.0),
+        (0.0, size * 1.55),
+        (size * 0.42, size * 1.15),
+        (size * 0.82, size * 1.72),
+        (size * 1.05, size * 1.54),
+        (size * 0.64, size * 0.96),
+        (size * 1.2, size * 0.96),
+    ];
+    let min_x = points
+        .iter()
+        .map(|(point_x, _)| point.0 + point_x)
+        .fold(f32::INFINITY, f32::min)
+        .max(0.0) as u32;
+    let max_x = points
+        .iter()
+        .map(|(point_x, _)| point.0 + point_x)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .min(width as f32) as u32;
+    let min_y = points
+        .iter()
+        .map(|(_, point_y)| point.1 + point_y)
+        .fold(f32::INFINITY, f32::min)
+        .max(0.0) as u32;
+    let max_y = points
+        .iter()
+        .map(|(_, point_y)| point.1 + point_y)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .min(height as f32) as u32;
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let local = (px as f32 + 0.5 - point.0, py as f32 + 0.5 - point.1);
+            if polygon_contains(local, &points) {
+                blend_rgba(pixels, width, height, px, py, [25, 31, 43, 255], 0.94);
+            }
+        }
+    }
+}
+
+fn zoom_rgba_around_point(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    point: (f32, f32),
+    scale: f32,
+) {
+    let original = pixels.to_vec();
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = (point.0 + (x as f32 + 0.5 - point.0) / scale)
+                .clamp(0.0, width.saturating_sub(1) as f32) as u32;
+            let source_y = (point.1 + (y as f32 + 0.5 - point.1) / scale)
+                .clamp(0.0, height.saturating_sub(1) as f32) as u32;
+            let source = ((source_y * width + source_x) * 4) as usize;
+            let target = ((y * width + x) * 4) as usize;
+            pixels[target..target + 4].copy_from_slice(&original[source..source + 4]);
+        }
+    }
+}
+
+fn polygon_contains(point: (f32, f32), polygon: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    for (first, second) in polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .take(polygon.len())
+    {
+        if (first.1 > point.1) != (second.1 > point.1) {
+            let at_x = (second.0 - first.0) * (point.1 - first.1)
+                / (second.1 - first.1)
+                + first.0;
+            if point.0 < at_x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+fn blend_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    color: [u8; 4],
+    alpha: f32,
+) {
+    if x >= width || y >= height {
+        return;
+    }
+    let index = ((y * width + x) * 4) as usize;
+    let alpha = alpha.clamp(0.0, 1.0);
+    for channel in 0..3 {
+        pixels[index + channel] = (f32::from(color[channel]) * alpha
+            + f32::from(pixels[index + channel]) * (1.0 - alpha))
+            .round() as u8;
+    }
+    pixels[index + 3] = 0xff;
 }

@@ -8,6 +8,7 @@ use takeseam::editor_timeline::{Clip, Timeline, Track};
 
 use super::background::{BackgroundSettings, BackgroundSource};
 use super::canvas_format::CanvasFormat;
+use super::cursor_effect::CursorEffect;
 
 const MEDIA_VERSION: u32 = 2;
 const TEXT_VERSION: u32 = 3;
@@ -25,9 +26,19 @@ struct Document {
     canvas: Option<CanvasFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     background: Option<BackgroundSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_effect: Option<CursorEffect>,
 }
 
+#[cfg(test)]
 pub(super) fn load(path: &Path) -> Result<(Timeline, u64, CanvasFormat, BackgroundSettings)> {
+    let (timeline, position, canvas, background, _) = load_with_cursor(path)?;
+    Ok((timeline, position, canvas, background))
+}
+
+pub(super) fn load_with_cursor(
+    path: &Path,
+) -> Result<(Timeline, u64, CanvasFormat, BackgroundSettings, CursorEffect)> {
     let file = File::open(path).context("无法打开剪辑工程")?;
     ensure!(
         file.metadata()?.len() <= MAX_PROJECT_BYTES,
@@ -66,15 +77,37 @@ pub(super) fn load(path: &Path) -> Result<(Timeline, u64, CanvasFormat, Backgrou
     }
     .context("剪辑工程的时间线无效")?;
     let playhead = document.playhead_us.min(timeline.duration());
-    Ok((timeline, playhead, canvas, background))
+    let cursor_effect = document
+        .cursor_effect
+        .unwrap_or_else(|| CursorEffect::default_for(timeline.duration()));
+    Ok((timeline, playhead, canvas, background, cursor_effect))
 }
 
+#[cfg(test)]
 pub(super) fn save(
     path: &Path,
     timeline: &Timeline,
     playhead: u64,
     canvas: CanvasFormat,
     background: &BackgroundSettings,
+) -> Result<()> {
+    save_with_cursor(
+        path,
+        timeline,
+        playhead,
+        canvas,
+        background,
+        &CursorEffect::default_for(timeline.duration()),
+    )
+}
+
+pub(super) fn save_with_cursor(
+    path: &Path,
+    timeline: &Timeline,
+    playhead: u64,
+    canvas: CanvasFormat,
+    background: &BackgroundSettings,
+    cursor_effect: &CursorEffect,
 ) -> Result<()> {
     ensure!(
         path.extension()
@@ -83,6 +116,7 @@ pub(super) fn save(
     );
     ensure!(canvas.is_valid(), "工程画幅尺寸无效");
     ensure!(background.is_valid(), "工程背景设置无效");
+    cursor_effect.validate()?;
     let parent = path
         .parent()
         .filter(|path| path.is_dir())
@@ -115,6 +149,7 @@ pub(super) fn save(
         tracks: Some(tracks),
         canvas: (!canvas.is_original()).then_some(canvas),
         background: backdrop,
+        cursor_effect: Some(cursor_effect.clone()),
     };
     let mut file = tempfile::NamedTempFile::new_in(parent).context("无法创建临时工程")?;
     {

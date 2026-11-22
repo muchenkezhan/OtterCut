@@ -6,6 +6,7 @@ use takeseam::editor_timeline::{Clip, Timeline, Track, TrackKind};
 
 use super::background::BackgroundSettings;
 use super::canvas_format::CanvasFormat;
+use super::cursor_effect::{CursorEffect, CursorTelemetry};
 use super::library::Library;
 use super::media::overlays::{Overlays, sequence_size};
 use super::media::{MediaInfo, MediaSlice, MediaTools, Preview, PreviewPlan, PreviewQuality};
@@ -13,6 +14,7 @@ use super::media::{MediaInfo, MediaSlice, MediaTools, Preview, PreviewPlan, Prev
 pub(super) struct Span<'a> {
     key: SpanKey,
     tracks: &'a [Track],
+    cursor_effect: Option<CursorEffect>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -96,6 +98,7 @@ impl<'a> Span<'a> {
                 excluded_overlay: None,
             },
             tracks: &[],
+            cursor_effect: None,
         }
     }
 
@@ -156,6 +159,7 @@ impl<'a> Span<'a> {
         Some(Self {
             key,
             tracks: timeline.tracks(),
+            cursor_effect: None,
         })
     }
 
@@ -181,6 +185,11 @@ impl<'a> Span<'a> {
         self
     }
 
+    pub(super) fn with_cursor_effect(mut self, effect: &CursorEffect) -> Self {
+        self.cursor_effect = Some(effect.clone());
+        self
+    }
+
     pub(super) fn for_background(duration: u64) -> Self {
         Self {
             key: SpanKey {
@@ -195,6 +204,7 @@ impl<'a> Span<'a> {
                 excluded_overlay: None,
             },
             tracks: &[],
+            cursor_effect: None,
         }
     }
 
@@ -261,6 +271,12 @@ impl<'a> Span<'a> {
                 }
             }
         }
+        let cursor = key.video.as_ref().and_then(|source| {
+            let path = PathBuf::from(format!("{}.cursor.json", source.path.display()));
+            path.is_file()
+                .then(|| CursorTelemetry::load(&path).ok())
+                .flatten()
+        });
         let from = position.min(key.end.saturating_sub(1));
         let excluded_overlay = if playing { None } else { key.excluded_overlay };
         Some(Ok(PreviewPlan {
@@ -274,6 +290,11 @@ impl<'a> Span<'a> {
             black_canvas: key.overlay_revision.is_some(),
             overlays: Overlays::in_range_excluding(self.tracks, from..key.end, excluded_overlay),
             excluded_overlay,
+            cursor,
+            cursor_effect: self
+                .cursor_effect
+                .clone()
+                .unwrap_or_else(|| CursorEffect::default_for(key.end)),
         }))
     }
 }

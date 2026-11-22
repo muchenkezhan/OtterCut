@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::PRODUCT_NAME;
 use takeseam::editor_timeline::{PRIMARY_AUDIO, PRIMARY_VIDEO, Timeline, TrackId, TrackKind};
 
@@ -10,6 +12,7 @@ use super::asset_info;
 use super::background::{BackgroundSettings, BackgroundSource};
 use super::background_panel;
 use super::canvas_format::CanvasFormat;
+use super::cursor_effect::{CursorClickEffect, CursorEffect, CursorTelemetry};
 use super::dock_model::{DockState, Pane};
 use super::export::{ExportJob, ExportQuality, ExportResolution, ExportSettings};
 use super::feature_panel::{self, FeatureTab};
@@ -63,6 +66,8 @@ pub(super) struct Workspace {
     saved_canvas_format: CanvasFormat,
     background: BackgroundSettings,
     saved_background: BackgroundSettings,
+    cursor_effect: CursorEffect,
+    saved_cursor_effect: CursorEffect,
     position: u64,
     player: Player,
     volume_preview: Option<(u64, i16)>,
@@ -74,6 +79,7 @@ pub(super) struct Workspace {
     media_error: Option<String>,
     focused: bool,
     closing_after_export: bool,
+    home: bool,
 }
 
 struct Notice {
@@ -127,6 +133,8 @@ impl Workspace {
             saved_canvas_format: CanvasFormat::Original,
             background: BackgroundSettings::default(),
             saved_background: BackgroundSettings::default(),
+            cursor_effect: CursorEffect::default_for(1),
+            saved_cursor_effect: CursorEffect::default_for(1),
             position: 0,
             player: Player::default(),
             volume_preview: None,
@@ -138,6 +146,7 @@ impl Workspace {
             media_error: None,
             focused: false,
             closing_after_export: false,
+            home: !cfg!(test),
         }
     }
 
@@ -172,6 +181,7 @@ impl Workspace {
         self.timeline.revision() != self.saved_revision
             || self.canvas_format != self.saved_canvas_format
             || self.background != self.saved_background
+            || self.cursor_effect != self.saved_cursor_effect
     }
 
     fn title(&self) -> String {
@@ -324,6 +334,9 @@ impl Workspace {
 
     fn sync_preview(&mut self, ctx: &egui::Context) {
         self.media_error = None;
+        if self.cursor_effect.end_us == 1 && self.duration() > 1 {
+            self.cursor_effect.end_us = self.duration();
+        }
         let span = if self.timeline.is_empty() {
             let asset = self.library.selected_path().map(Path::to_owned);
             if let Some(path) = asset {
@@ -373,6 +386,7 @@ impl Workspace {
             span.map(|span| {
                 span.with_canvas_format(self.canvas_format)
                     .with_background(&self.background)
+                    .with_cursor_effect(&self.cursor_effect)
             }),
             &mut self.library,
             self.position,
@@ -403,8 +417,12 @@ impl Workspace {
         else {
             return;
         };
-        match project::load(&path) {
-            Ok((timeline, position, canvas_format, background)) => {
+        self.open_project_path(ctx, path);
+    }
+
+    fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        match project::load_with_cursor(&path) {
+            Ok((timeline, position, canvas_format, background, cursor_effect)) => {
                 for clip in timeline.all_clips().filter(|clip| clip.text.is_none()) {
                     self.library.insert(clip.path.clone(), false);
                 }
@@ -415,6 +433,8 @@ impl Workspace {
                 self.saved_canvas_format = canvas_format;
                 self.saved_background = background.clone();
                 self.background = background;
+                self.saved_cursor_effect = cursor_effect.clone();
+                self.cursor_effect = cursor_effect;
                 self.position = position;
                 self.selected_clip = None;
                 self.text_inspector = TextInspector::default();
@@ -424,6 +444,7 @@ impl Workspace {
                 self.player.playing = false;
                 self.player.reset();
                 self.project = Some(path);
+                self.home = false;
                 self.show_notice("工程已打开", false);
             }
             Err(error) => self.show_notice(format!("{error:#}"), true),
@@ -445,18 +466,20 @@ impl Workspace {
                 .save_file()
         };
         let Some(path) = path else { return };
-        match project::save(
+        match project::save_with_cursor(
             &path,
             &self.timeline,
             self.position,
             self.canvas_format,
             &self.background,
+            &self.cursor_effect,
         ) {
             Ok(()) => {
                 self.project = Some(path);
                 self.saved_revision = self.timeline.revision();
                 self.saved_canvas_format = self.canvas_format;
                 self.saved_background.clone_from(&self.background);
+                self.saved_cursor_effect.clone_from(&self.cursor_effect);
                 self.show_notice("工程已保存", false);
             }
             Err(error) => self.show_notice(format!("{error:#}"), true),
@@ -1128,6 +1151,7 @@ impl Workspace {
         } else {
             self.position
         };
+        self.timeline_view.set_cursor_markers(self.cursor_markers());
         let input = self.timeline_view.draw(
             ui,
             &mut self.timeline,
@@ -1190,7 +1214,34 @@ impl Workspace {
         }
     }
 
+    fn cursor_markers(&self) -> Vec<u64> {
+        self.timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| {
+                track.clips.iter().flat_map(|clip| {
+                    let path = PathBuf::from(format!("{}.cursor.json", clip.path.display()));
+                    CursorTelemetry::load(&path)
+                        .ok()
+                        .into_iter()
+                        .flat_map(move |telemetry| {
+                            telemetry
+                                .samples
+                                .into_iter()
+                                .filter(|sample| sample.pressed)
+                                .map(move |sample| clip.start.saturating_add(sample.at_us))
+                        })
+                })
+            })
+            .collect()
+    }
+
     fn draw(&mut self, ui: &mut egui::Ui) {
+        if self.home {
+            self.home_screen(ui);
+            return;
+        }
         let logo = self.logo.clone();
         let title = self.title();
         let mut docking = self.docking.take().expect("workspace layout initialized");
@@ -1325,6 +1376,10 @@ impl Workspace {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        if self.cursor_telemetry_available() {
+            self.cursor_effect_inspector(ui);
+            ui.separator();
+        }
         if self.overlay_inspector(ui) {
             return;
         }
@@ -1336,6 +1391,323 @@ impl Workspace {
             inspector_details::media(ui, path, self.library.info(path), None);
         }
     }
+
+    fn cursor_telemetry_available(&self) -> bool {
+        self.timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .any(|clip| {
+                PathBuf::from(format!("{}.cursor.json", clip.path.display())).is_file()
+            })
+    }
+
+    fn cursor_effect_inspector(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("鼠标效果", |ui| {
+            let duration = self.duration().max(1);
+            ui.add(
+                egui::Slider::new(&mut self.cursor_effect.start_us, 0..=duration)
+                    .text("开始"),
+            );
+            self.cursor_effect.start_us = self.cursor_effect.start_us.min(duration - 1);
+            ui.add(
+                egui::Slider::new(
+                    &mut self.cursor_effect.end_us,
+                    (self.cursor_effect.start_us + 1)..=duration,
+                )
+                .text("结束"),
+            );
+            ui.checkbox(&mut self.cursor_effect.enabled, "显示鼠标");
+            ui.add(
+                egui::Slider::new(&mut self.cursor_effect.cursor_scale, 0.5..=4.0)
+                    .text("鼠标大小"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.cursor_effect.zoom_scale, 1.0..=3.0)
+                    .text("点击放大"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.cursor_effect.smoothing, 0.0..=1.0)
+                    .text("跟随平滑"),
+            );
+            ui.horizontal(|ui| {
+                ui.label("点击反馈");
+                for (effect, label) in [
+                    (CursorClickEffect::Ring, "波纹"),
+                    (CursorClickEffect::Dot, "圆点"),
+                    (CursorClickEffect::None, "无"),
+                ] {
+                    if ui
+                        .selectable_label(self.cursor_effect.click_effect == effect, label)
+                        .clicked()
+                    {
+                        self.cursor_effect.click_effect = effect;
+                    }
+                }
+            });
+        });
+    }
+
+    fn home_screen(&mut self, ui: &mut egui::Ui) {
+        let colors = ui_theme::palette(ui.ctx());
+        let projects = self.home_projects();
+        let area = ui.available_rect_before_wrap();
+        let content_width = area.width().min(980.0);
+        let content_rect = egui::Rect::from_center_size(
+            area.center(),
+            vec2(content_width, area.height()),
+        );
+        let background = egui::Color32::from_rgb(14, 18, 25);
+        ui.painter().rect_filled(area, 0.0, background);
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+
+        content.add_space(22.0);
+        content.horizontal(|ui| {
+            ui.add(
+                egui::Image::new(&self.logo)
+                    .fit_to_exact_size(vec2(30.0, 30.0))
+                    .corner_radius(8.0),
+            );
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(PRODUCT_NAME).size(16.0).strong().color(colors.text));
+                ui.label(RichText::new("本地剪辑工程").size(11.0).color(colors.muted));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_sized(
+                        [112.0, 32.0],
+                        egui::Button::new(RichText::new("打开工程").size(12.0)),
+                    )
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_title("打开剪辑工程")
+                        .add_filter(format!("{} 工程", PRODUCT_NAME), &["takeproj"])
+                        .pick_file()
+                {
+                    self.open_project_path(ui.ctx(), path);
+                }
+            });
+        });
+
+        content.add_space(44.0);
+        egui::Frame::new()
+            .fill(colors.surface)
+            .corner_radius(18.0)
+            .stroke(egui::Stroke::new(1.0, colors.border))
+            .inner_margin(28.0)
+            .show(&mut content, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("开始创作")
+                                .size(25.0)
+                                .strong()
+                                .color(colors.text),
+                        );
+                        ui.add_space(5.0);
+                        ui.label(
+                            RichText::new("新建项目，或者继续编辑最近的工程")
+                                .size(13.0)
+                                .color(colors.muted),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add_sized(
+                                [168.0, 46.0],
+                                egui::Button::new(RichText::new("新建空白工程").size(14.0))
+                                    .fill(colors.accent_fill),
+                            )
+                            .clicked()
+                        {
+                            self.new_project(ui.ctx());
+                        }
+                    });
+                });
+            });
+
+        content.add_space(32.0);
+        content.horizontal(|ui| {
+            ui.label(RichText::new("最近工程").size(17.0).strong().color(colors.text));
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!("{} 个", projects.len()))
+                    .size(12.0)
+                    .color(colors.muted),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(self.library.directory().to_string_lossy())
+                        .size(11.0)
+                        .color(colors.muted),
+                );
+            });
+        });
+        content.add_space(12.0);
+
+        if projects.is_empty() {
+            egui::Frame::new()
+                .fill(colors.surface.gamma_multiply(0.82))
+                .corner_radius(14.0)
+                .stroke(egui::Stroke::new(1.0, colors.border))
+                .inner_margin(24.0)
+                .show(&mut content, |ui| {
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), 170.0),
+                        Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(
+                                RichText::new("这里还没有工程，点击上方开始创作")
+                                    .size(13.0)
+                                    .color(colors.muted),
+                            );
+                        },
+                    );
+                });
+        } else {
+            egui::ScrollArea::vertical().show(&mut content, |ui| {
+                egui::Grid::new("home-project-grid")
+                    .num_columns(3)
+                    .spacing([14.0, 14.0])
+                    .show(ui, |ui| {
+                        for (index, (path, modified)) in projects.iter().enumerate() {
+                                    let thumbnail = self
+                                        .project_thumbnail_source(path)
+                                        .and_then(|source| self.thumbnails.texture(&source).cloned());
+                                    let mut open_card = false;
+                                    let card = ui.allocate_ui([250.0, 180.0].into(), |ui| {
+                                egui::Frame::new()
+                                    .fill(colors.surface)
+                                    .corner_radius(12.0)
+                                    .stroke(egui::Stroke::new(1.0, colors.border))
+                                    .inner_margin(14.0)
+                                    .show(ui, |ui| {
+                                                if let Some(thumbnail) = &thumbnail {
+                                                    ui.add(
+                                                        egui::Image::new(thumbnail)
+                                                            .fit_to_exact_size(vec2(222.0, 96.0))
+                                                            .corner_radius(8.0),
+                                                    );
+                                                } else {
+                                                    let placeholder = ui.allocate_exact_size(
+                                                        vec2(222.0, 96.0),
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        placeholder.0,
+                                                        8.0,
+                                                        colors.control,
+                                                    );
+                                                    ui.painter().text(
+                                                        placeholder.0.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        "暂无预览",
+                                                        egui::FontId::proportional(11.0),
+                                                        colors.muted,
+                                                    );
+                                                }
+                                                ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new(filename(path))
+                                                .size(14.0)
+                                                .strong()
+                                                .color(colors.text),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(format_modified(*modified))
+                                                .size(11.0)
+                                                .color(colors.muted),
+                                        );
+                                        ui.add_space(8.0);
+                                                    if ui
+                                            .button(RichText::new("打开工程").size(11.0))
+                                            .clicked()
+                                        {
+                                                        open_card = true;
+                                        }
+                                    });
+                                    });
+                                    if card.response.clicked() {
+                                        open_card = true;
+                                    }
+                                    if open_card {
+                                        self.open_project_path(ui.ctx(), path.clone());
+                                    }
+                            if (index + 1) % 3 == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
+        }
+    }
+    fn home_projects(&self) -> Vec<(PathBuf, SystemTime)> {
+        let mut projects = fs::read_dir(self.library.directory())
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.flatten())
+            .filter_map(|entry| {
+                let path = entry.path();
+                let is_project = path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("takeproj"));
+                if !is_project {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((path, modified))
+            })
+            .collect::<Vec<_>>();
+        projects.sort_unstable_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+        projects
+    }
+
+    fn project_thumbnail_source(&self, path: &Path) -> Option<PathBuf> {
+        let (timeline, _, _, _, _) = project::load_with_cursor(path).ok()?;
+        timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.text.is_none())
+            .map(|clip| clip.path.clone())
+    }
+
+    fn new_project(&mut self, ctx: &egui::Context) {
+        self.timeline = Timeline::from_tracks(Vec::new()).expect("empty timeline is valid");
+        self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
+        self.project = None;
+        self.selected_clip = None;
+        self.position = 0;
+        self.saved_revision = self.timeline.revision();
+        self.cursor_effect = CursorEffect::default_for(1);
+        self.saved_cursor_effect = self.cursor_effect.clone();
+        self.background = BackgroundSettings::default();
+        self.saved_background = self.background.clone();
+        self.canvas_format = CanvasFormat::Original;
+        self.saved_canvas_format = CanvasFormat::Original;
+        self.player.reset();
+        self.home = false;
+    }
+}
+
+fn format_modified(modified: SystemTime) -> String {
+    let Ok(age) = modified.elapsed() else {
+        return String::from("本地工程");
+    };
+    let label = if age.as_secs() < 60 {
+        String::from("刚刚修改")
+    } else if age.as_secs() < 3_600 {
+        format!("{} 分钟前修改", age.as_secs() / 60)
+    } else if age.as_secs() < 86_400 {
+        format!("{} 小时前修改", age.as_secs() / 3_600)
+    } else {
+        format!("{} 天前修改", age.as_secs() / 86_400)
+    };
+    label
 }
 
 impl eframe::App for Workspace {
@@ -1402,3 +1774,4 @@ impl eframe::App for Workspace {
         self.sync_preview(&ctx);
     }
 }
+
