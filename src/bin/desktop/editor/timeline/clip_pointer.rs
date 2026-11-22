@@ -48,14 +48,7 @@ impl TimelineView {
                         && let Some(press) = &self.clip_press
                         && press.origin.distance_sq(p) > threshold * threshold
                     {
-                        let mut drag = press.drag;
-                        let delta = p - press.origin;
-                        if matches!(drag.kind, Gesture::Volume { .. })
-                            && delta.x.abs() > delta.y.abs()
-                        {
-                            drag.kind = Gesture::Move;
-                        }
-                        self.drag = Some(drag);
+                        self.drag = Some(press.drag);
                     }
                     if matches!(event, Input::Release(_)) {
                         self.clip_press = None;

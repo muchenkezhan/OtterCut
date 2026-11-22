@@ -49,6 +49,8 @@ impl AudioDecode {
             .default_output_config()
             .context("无法读取默认音频输出格式")?;
         let config = cfg.config();
+        let source_ids: Vec<_> = self.sources.iter().map(|source| source.id).collect();
+        let decoded_channels = source_ids.len().saturating_mul(2).max(2);
         let (packets, receiver) = mpsc::sync_channel(18);
         let mut player = AudioOutput {
             receiver,
@@ -56,6 +58,8 @@ impl AudioDecode {
             packet: Vec::new(),
             packet_start: 0,
             next_frame: None,
+            source_ids,
+            decoded_channels,
             config: config.clone(),
         };
         let errors = self.errors.clone();
@@ -90,10 +94,10 @@ impl AudioDecode {
             &self.sources,
             self.duration_us,
             config.sample_rate,
-            config.channels,
+            decoded_channels as u16,
         )?;
         let audio_packet_size =
-            (config.sample_rate / 50) as usize * usize::from(config.channels) * 4;
+            (config.sample_rate / 50) as usize * decoded_channels * 4;
         self.decoder.decode(command, |mut stdout| {
             let mut bytes = vec![0; audio_packet_size];
             while !self.decoder.cancelled() {
@@ -189,11 +193,10 @@ fn mix_command(
     if sources.len() == 1 {
         filters.push_str("anull[mix]");
     } else {
-        write!(
-            filters,
-            "amix=inputs={}:normalize=0:dropout_transition=0,alimiter=limit=0.95:level=false:latency=true[mix]",
-            sources.len()
-        )?;
+        // Keep each source in its own stereo pair. The CPAL callback mixes those
+        // pairs and applies the live gain atomically, so dragging a clip's volume
+        // line never has to restart FFmpeg.
+        write!(filters, "amerge=inputs={}[mix]", sources.len())?;
     }
     command
         .args([
@@ -226,6 +229,8 @@ struct AudioOutput {
     packet: Vec<f32>,
     packet_start: usize,
     next_frame: Option<i64>,
+    source_ids: Vec<u64>,
+    decoded_channels: usize,
     config: StreamConfig,
 }
 
@@ -239,7 +244,8 @@ impl AudioOutput {
         let Some(epoch) = self.clock.epoch.get().copied() else {
             return;
         };
-        let channels = usize::from(self.config.channels);
+        let output_channels = usize::from(self.config.channels);
+        let decoded_channels = self.decoded_channels;
         let frame = self.next_frame.unwrap_or_else(|| {
             let timestamp = info.timestamp();
             let delay = timestamp
@@ -254,13 +260,22 @@ impl AudioOutput {
             };
             (time * f64::from(self.config.sample_rate)).round() as i64
         });
-        let frames = samples.len() / channels;
+        let frames = samples.len() / output_channels;
         self.next_frame = Some(frame.saturating_add(frames as i64));
         let first = frame.unsigned_abs().min(frames as u64) as usize;
-        let mut written = if frame < 0 { first * channels } else { 0 };
-        let mut cursor = frame.max(0) as usize * channels;
+        let mut written = if frame < 0 {
+            first * output_channels
+        } else {
+            0
+        };
+        let mut cursor = frame.max(0) as usize * decoded_channels;
+        let gain_db_tenths = self
+            .clock
+            .live_gain_db_tenths
+            .load(Ordering::Acquire);
+        let gain = 10.0_f32.powf(f32::from(gain_db_tenths) / 200.0);
         while written < samples.len() {
-            while cursor >= self.packet_start + self.packet.len() {
+            while cursor.saturating_add(decoded_channels) > self.packet_start + self.packet.len() {
                 let Ok(packet) = self.receiver.try_recv() else {
                     return;
                 };
@@ -268,15 +283,28 @@ impl AudioOutput {
                 self.packet = packet;
             }
             let offset = cursor - self.packet_start;
-            let count = (self.packet.len() - offset).min(samples.len() - written);
-            for (output, &source) in samples[written..written + count]
-                .iter_mut()
-                .zip(&self.packet[offset..offset + count])
-            {
-                *output = T::from_sample(source);
+            let mut left = 0.0_f32;
+            let mut right = 0.0_f32;
+            let live_source = self
+                .clock
+                .live_volume_source
+                .load(Ordering::Acquire);
+            for (source_index, source_id) in self.source_ids.iter().enumerate() {
+                let source_gain = if *source_id == live_source { gain } else { 1.0 };
+                left += self.packet[offset + source_index * 2] * source_gain;
+                right += self.packet[offset + source_index * 2 + 1] * source_gain;
             }
-            cursor += count;
-            written += count;
+            let mixed = [left, right];
+            for channel in 0..output_channels {
+                let value = if output_channels == 1 {
+                    (left + right) * 0.5
+                } else {
+                    mixed[channel.min(1)]
+                };
+                samples[written + channel] = T::from_sample(value.clamp(-1.0, 1.0));
+            }
+            cursor += decoded_channels;
+            written += output_channels;
         }
     }
 }
@@ -312,6 +340,7 @@ mod tests {
             assert!(info.has_audio);
             assert!(!info.has_video);
             MediaSlice {
+                id: frequency as u64,
                 path,
                 range: 200_000..700_000,
                 volume_db_tenths: 0,

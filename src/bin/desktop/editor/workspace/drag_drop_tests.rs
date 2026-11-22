@@ -338,6 +338,13 @@ fn verify_material_drop(location: DropLocation) {
         .find(|clip| filename(&clip.path) == "first.mp4")
         .unwrap();
     assert_eq!(first_clip.duration(), 2_000_000);
+    assert!(workspace.timeline.tracks().iter().any(|track| {
+        track.kind == TrackKind::Video
+            && track
+                .clips
+                .iter()
+                .any(|clip| filename(&clip.path) == "second.mp4")
+    }));
     let audio = workspace
         .timeline
         .tracks()
@@ -345,9 +352,7 @@ fn verify_material_drop(location: DropLocation) {
         .find(|track| track.kind == TrackKind::Audio)
         .map(|track| &track.clips)
         .unwrap();
-    assert_eq!(audio.len(), 1);
-    assert_eq!(filename(&audio[0].path), "second.mp4");
-    assert!(audio[0].start <= workspace.timeline.duration());
+    assert!(audio.is_empty());
     for _ in 0..4 {
         assert!(workspace.timeline.undo());
     }

@@ -64,13 +64,7 @@ pub(super) fn interact(
         let kind = empty_timeline_kind(&asset);
         Some(TrackDestination::New { kind, before: None })
     } else if let Some(gap) = gap {
-        let prefer_audio =
-            asset.has_audio == Some(true) && (asset.has_video == Some(false) || pointer.y > gap.y);
-        let order = if prefer_audio {
-            [TrackKind::Audio, TrackKind::Video]
-        } else {
-            [TrackKind::Video, TrackKind::Audio]
-        };
+        let order = preferred_order(&asset);
         order
             .into_iter()
             .find(|&kind| gap.allows(kind) && fits(kind, &asset))
@@ -84,7 +78,24 @@ pub(super) fn interact(
             .at(timeline, pointer.y)
             .or_else(|| timeline.track(target.active_track))
             .ok_or(TimelineError::TrackNotFound(target.active_track))?;
-        fits(track.kind, &asset).then_some(TrackDestination::Existing(track.id))
+        if fits(track.kind, &asset) {
+            Some(TrackDestination::Existing(track.id))
+        } else {
+            // Keep the clip's media type when the pointer lands on an
+            // incompatible row. Insert a matching track beside that row rather
+            // than silently turning a video card into an audio clip.
+            let kind = if asset.has_video != Some(false) {
+                TrackKind::Video
+            } else if asset.has_audio == Some(true) {
+                TrackKind::Audio
+            } else {
+                return Err(TimelineError::IncompatibleTrack);
+            };
+            Some(TrackDestination::New {
+                kind,
+                before: Some(track.id),
+            })
+        }
     };
     let Some(destination) = destination else {
         ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
@@ -133,7 +144,18 @@ fn fits(kind: TrackKind, asset: &DraggedAsset) -> bool {
     match kind {
         TrackKind::Text | TrackKind::Caption => false,
         TrackKind::Video => asset.has_video != Some(false),
-        TrackKind::Audio => asset.has_audio != Some(false),
+        // A media card with a picture must remain a video clip. This also keeps
+        // an unprobed video from falling through to an audio row while FFprobe
+        // is still resolving its streams.
+        TrackKind::Audio => asset.has_video == Some(false) && asset.has_audio != Some(false),
+    }
+}
+
+fn preferred_order(asset: &DraggedAsset) -> [TrackKind; 2] {
+    if asset.has_video == Some(false) && asset.has_audio != Some(false) {
+        [TrackKind::Audio, TrackKind::Video]
+    } else {
+        [TrackKind::Video, TrackKind::Audio]
     }
 }
 
@@ -226,5 +248,41 @@ mod tests {
             has_audio: Some(true),
         };
         assert_eq!(empty_timeline_kind(&asset), TrackKind::Audio);
+    }
+
+    #[test]
+    fn audiovisual_media_prefers_a_video_track_when_creating_a_gap_track() {
+        let asset = DraggedAsset {
+            path: "screen.mp4".into(),
+            duration_us: Some(1_000_000),
+            has_video: Some(true),
+            has_audio: Some(true),
+        };
+        assert_eq!(preferred_order(&asset), [TrackKind::Video, TrackKind::Audio]);
+    }
+
+    #[test]
+    fn video_cards_never_fit_an_audio_track() {
+        let asset = DraggedAsset {
+            path: "screen.mp4".into(),
+            duration_us: Some(1_000_000),
+            has_video: Some(true),
+            has_audio: Some(true),
+        };
+        assert!(fits(TrackKind::Video, &asset));
+        assert!(!fits(TrackKind::Audio, &asset));
+    }
+
+    #[test]
+    fn unprobed_cards_do_not_fall_into_audio_tracks() {
+        let asset = DraggedAsset {
+            path: "pending.mp4".into(),
+            duration_us: None,
+            has_video: None,
+            has_audio: None,
+        };
+        assert_eq!(empty_timeline_kind(&asset), TrackKind::Video);
+        assert!(fits(TrackKind::Video, &asset));
+        assert!(!fits(TrackKind::Audio, &asset));
     }
 }

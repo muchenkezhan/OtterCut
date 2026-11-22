@@ -15,7 +15,7 @@ pub(super) struct Span<'a> {
     tracks: &'a [Track],
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct SpanKey {
     start: u64,
     end: u64,
@@ -30,6 +30,7 @@ struct SpanKey {
 
 #[derive(Clone, PartialEq, Eq)]
 struct Source {
+    id: u64,
     path: PathBuf,
     on_timeline: u64,
     source_start: u64,
@@ -40,6 +41,7 @@ struct Source {
 impl Source {
     fn for_clip(clip: &Clip) -> Self {
         Self {
+            id: clip.id,
             path: clip.path.clone(),
             on_timeline: clip.start,
             source_start: clip.source_start,
@@ -63,6 +65,7 @@ impl Source {
             end - 1
         };
         Some(MediaSlice {
+            id: self.id,
             path: self.path.clone(),
             range: offset(from).min(last)..end,
             volume_db_tenths: self.volume_db_tenths,
@@ -73,6 +76,7 @@ impl Source {
 impl<'a> Span<'a> {
     pub(super) fn for_asset(path: &Path, info: MediaInfo) -> Self {
         let source = Source {
+            id: 0,
             path: path.to_owned(),
             on_timeline: 0,
             source_start: 0,
@@ -157,6 +161,18 @@ impl<'a> Span<'a> {
 
     pub(super) fn with_excluded_overlay(mut self, id: Option<u64>) -> Self {
         self.key.excluded_overlay = id;
+        self
+    }
+
+    pub(super) fn with_volume_override(mut self, id: Option<u64>, volume: Option<i16>) -> Self {
+        let (Some(id), Some(volume)) = (id, volume) else {
+            return self;
+        };
+        for source in &mut self.key.audio {
+            if source.id == id {
+                source.volume_db_tenths = volume;
+            }
+        }
         self
     }
 
@@ -262,6 +278,57 @@ impl<'a> Span<'a> {
     }
 }
 
+impl SpanKey {
+    /// Returns true when only the gain of one or more existing audio sources changed.
+    ///
+    /// Video and audio source placement are deliberately compared here. A change to a
+    /// clip's position, source range, or media path must still rebuild the complete preview.
+    fn differs_only_in_audio_volume(&self, other: &Self) -> bool {
+        self.start == other.start
+            && self.end == other.end
+            && self.canvas == other.canvas
+            && self.canvas_format == other.canvas_format
+            && self.background == other.background
+            && self.video == other.video
+            && self.overlay_revision == other.overlay_revision
+            && self.excluded_overlay == other.excluded_overlay
+            && self.audio.len() == other.audio.len()
+            && self
+                .audio
+                .iter()
+                .zip(&other.audio)
+                .all(|(left, right)| left.same_media(right))
+            && self
+                .audio
+                .iter()
+                .zip(&other.audio)
+                .any(|(left, right)| left.volume_db_tenths != right.volume_db_tenths)
+    }
+
+    fn changed_audio_volume(&self, other: &Self) -> Option<(u64, i16)> {
+        if !self.differs_only_in_audio_volume(other) {
+            return None;
+        }
+        let mut changed = self
+            .audio
+            .iter()
+            .zip(&other.audio)
+            .filter(|(left, right)| left.volume_db_tenths != right.volume_db_tenths);
+        let (_, right) = changed.next()?;
+        changed.next().is_none().then_some((right.id, right.volume_db_tenths))
+    }
+}
+
+impl Source {
+    fn same_media(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.path == other.path
+            && self.on_timeline == other.on_timeline
+            && self.source_start == other.source_start
+            && self.source_end == other.source_end
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Player {
     pub(super) playing: bool,
@@ -275,6 +342,7 @@ struct Active {
     from: u64,
     playing: bool,
     quality: PreviewQuality,
+    audio_base_volumes: Vec<(u64, i16)>,
     requested: bool,
     error: Option<String>,
 }
@@ -386,6 +454,11 @@ impl Player {
             }
             return None;
         };
+        let volume_change = self
+            .active
+            .as_ref()
+            .and_then(|active| active.span.changed_audio_volume(&span.key));
+        let volume_only = volume_change.is_some();
         let changed = self.active.as_ref().is_none_or(|active| {
             active.span != span.key
                 || active.playing != self.playing
@@ -406,7 +479,10 @@ impl Player {
                     && (active.from == position
                         || (active.playing && (active.from..=active.span.end).contains(&position)))
             });
-            if keep_picture {
+            if volume_only {
+                // Volume automation is handled by the audio path below. Keep the
+                // video decoder and its current frame alive while the line moves.
+            } else if keep_picture {
                 // Keep the displayed frame and its overlay stamp until the replacement arrives.
                 self.preview.stop();
             } else {
@@ -414,12 +490,29 @@ impl Player {
             }
         }
         let plan = tools.and_then(|_| span.plan(library, position, self.playing, self.quality));
+        let previous_from = self.active.as_ref().map(|active| active.from);
         if changed {
             self.active = Some(Active {
-                span: span.key,
-                from: position,
+                span: span.key.clone(),
+                from: if volume_only {
+                    previous_from.unwrap_or(position)
+                } else {
+                    position
+                },
                 playing: self.playing,
                 quality: self.quality,
+                audio_base_volumes: if volume_only {
+                    self.active
+                        .as_ref()
+                        .map(|active| active.audio_base_volumes.clone())
+                        .unwrap_or_default()
+                } else {
+                    span.key
+                        .audio
+                        .iter()
+                        .map(|source| (source.id, source.volume_db_tenths))
+                        .collect()
+                },
                 requested: false,
                 error: None,
             });
@@ -429,7 +522,18 @@ impl Player {
         if !active.requested {
             match plan? {
                 Ok(plan) => {
-                    self.preview.start(tools, ctx, plan, self.playing);
+                    if volume_only && self.playing {
+                        if let Some((source_id, target)) = volume_change {
+                            let base = active
+                                .audio_base_volumes
+                                .iter()
+                                .find_map(|(id, volume)| (*id == source_id).then_some(*volume))
+                                .unwrap_or(target);
+                            self.preview.set_live_volume(source_id, target - base);
+                        }
+                    } else {
+                        self.preview.start(tools, ctx, plan, self.playing);
+                    }
                     active.error = None;
                     active.requested = true;
                 }

@@ -218,6 +218,15 @@ pub(super) struct Draft {
 }
 
 impl Draft {
+    pub(super) fn volume_value(&self) -> Option<i16> {
+        match self.action {
+            Edit::Volume(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl Draft {
     fn reorder(&mut self, clips: &[Clip], at: u64) {
         let mut others = clips.iter().filter(|clip| clip.id != self.id);
         let before = others

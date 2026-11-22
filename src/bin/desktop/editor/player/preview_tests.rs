@@ -40,6 +40,27 @@ fn clip_volume_changes_the_preview_span_without_changing_its_source() {
 }
 
 #[test]
+fn volume_changes_are_classified_separately_from_media_changes() {
+    let mut timeline = Timeline::default();
+    let path = PathBuf::from("voice.wav");
+    let clip = timeline
+        .insert_media_on_track(PRIMARY_AUDIO, path, 800_000, 0)
+        .unwrap();
+    let original = Span::at(&timeline, 200_000).unwrap().key;
+    timeline.set_clip_volume(clip, -120).unwrap();
+    let adjusted = Span::at(&timeline, 200_000).unwrap().key;
+
+    assert!(original.differs_only_in_audio_volume(&adjusted));
+    assert!(adjusted.differs_only_in_audio_volume(&original));
+
+    timeline
+        .move_clip(clip, 100_000)
+        .expect("moving a clip should remain a media change");
+    let moved = Span::at(&timeline, 200_000).unwrap().key;
+    assert!(!adjusted.differs_only_in_audio_volume(&moved));
+}
+
+#[test]
 #[ignore = "requires local FFmpeg with libass and FFprobe"]
 fn paused_preview_renders_captions_on_a_black_canvas_at_the_playhead() {
     let tools = MediaTools::discover().unwrap();

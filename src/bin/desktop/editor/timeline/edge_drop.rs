@@ -6,6 +6,7 @@ use crate::ui_theme;
 use super::canvas::Viewport;
 use super::track_rows::Rows;
 
+#[cfg(test)]
 pub(super) const BAND_HEIGHT: f32 = 26.0;
 // Each clip is inset by four points from its row edges.
 const ROW_SEAM_HALF_HEIGHT: f32 = 4.0;

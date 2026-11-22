@@ -818,15 +818,13 @@ fn audio_volume_line_adjusts_gain_without_moving_the_clip() {
 }
 
 #[test]
-fn horizontal_drag_on_an_audio_clip_moves_it_on_its_own_track() {
+fn horizontal_drag_on_volume_line_only_changes_volume() {
     use takeseam::editor_timeline::PRIMARY_AUDIO;
 
-    let (mut timeline, clip) = drag_audio_from_volume_line(vec2(56.0, 0.0));
+    let (timeline, clip) = drag_audio_from_volume_line(vec2(56.0, 0.0));
     assert_eq!(timeline.track_for_clip(clip).unwrap().id, PRIMARY_AUDIO);
-    assert_eq!(timeline.clip(clip).unwrap().start, 2_000_000);
-    assert_eq!(timeline.clip(clip).unwrap().volume_db_tenths, 0);
-    assert!(timeline.undo());
     assert_eq!(timeline.clip(clip).unwrap().start, 1_000_000);
+    assert_eq!(timeline.clip(clip).unwrap().volume_db_tenths, 0);
 }
 
 fn drag_audio_from_volume_line(delta: egui::Vec2) -> (Timeline, u64) {

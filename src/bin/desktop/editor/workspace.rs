@@ -65,6 +65,7 @@ pub(super) struct Workspace {
     saved_background: BackgroundSettings,
     position: u64,
     player: Player,
+    volume_preview: Option<(u64, i16)>,
     preview_viewport: PreviewViewport,
     pending_additions: VecDeque<MaterialAddition>,
     export: ExportJob,
@@ -128,6 +129,7 @@ impl Workspace {
             saved_background: BackgroundSettings::default(),
             position: 0,
             player: Player::default(),
+            volume_preview: None,
             preview_viewport: PreviewViewport::default(),
             pending_additions: VecDeque::new(),
             export: ExportJob::default(),
@@ -350,7 +352,12 @@ impl Workspace {
                 )
                 .map(|(id, _)| id)
             };
-            Span::at(&self.timeline, self.position).map(|span| span.with_excluded_overlay(exclude))
+            Span::at(&self.timeline, self.position).map(|span| {
+                span.with_excluded_overlay(exclude).with_volume_override(
+                    self.volume_preview.map(|(id, _)| id),
+                    self.volume_preview.map(|(_, volume)| volume),
+                )
+            })
         };
         if self.media_error.is_some() {
             self.player.playing = false;
@@ -1128,6 +1135,8 @@ impl Workspace {
             &mut self.selected_clip,
             add_enabled,
         );
+        let volume_changed = input.volume_changed;
+        self.volume_preview = input.volume_preview;
         if let Some(drop) = input.material_drop {
             self.queue_material(ui.ctx(), drop.path, drop.destination, Some(drop.at));
         } else if input.add_material
@@ -1171,9 +1180,11 @@ impl Workspace {
             self.player.playing = false;
         }
         if self.timeline.revision() != old_revision {
-            self.position = self.position.min(self.timeline.duration());
-            self.player.playing = false;
-            self.player.reset();
+            if !volume_changed {
+                self.position = self.position.min(self.timeline.duration());
+                self.player.playing = false;
+                self.player.reset();
+            }
         } else if self.position != old_position {
             self.player.reset();
         }

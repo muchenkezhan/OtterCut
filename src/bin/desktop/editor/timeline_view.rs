@@ -38,14 +38,13 @@ mod toolbar;
 mod track_rows;
 
 use canvas::{
-    RULER_HEIGHT, SECOND, TRACK_HEIGHT, Viewport, paint_draft, paint_playhead, paint_ruler,
-    timecode,
+    RULER_HEIGHT, SECOND, Viewport, paint_draft, paint_playhead, paint_ruler, timecode,
 };
 use clip_media::{ClipMedia, VolumeLine};
 use clip_pointer::ClipPress;
 use commands::{ClipboardClip, Command, Edge, execute, normalize_selection};
 use context_menu::ContextMenu;
-use edge_drop::{BAND_HEIGHT, TrackGap};
+use edge_drop::TrackGap;
 use gesture::{ClipDrag, Gesture, difference};
 use marquee::MarqueeSelection;
 use track_rows::{Rows, TrackAction, VERTICAL_SCROLL_WIDTH};
@@ -76,6 +75,8 @@ pub struct TimelineView {
     vertical_scroll_drag: Option<f32>,
     media: Option<ClipMedia>,
     context_menu: Option<ContextMenu>,
+    volume_changed: bool,
+    volume_preview: Option<(u64, i16)>,
 }
 
 pub(super) struct TimelineInput {
@@ -83,6 +84,8 @@ pub(super) struct TimelineInput {
     pub clipboard_feedback: Option<&'static str>,
     pub add_material: bool,
     pub material_drop: Option<MaterialDrop>,
+    pub volume_changed: bool,
+    pub volume_preview: Option<(u64, i16)>,
 }
 
 pub(super) struct MaterialDrop {
@@ -147,6 +150,8 @@ impl TimelineView {
         selected: &mut Option<u64>,
         add_enabled: bool,
     ) -> TimelineInput {
+        self.volume_changed = false;
+        self.volume_preview = None;
         normalize_selection(timeline, playhead, selected);
         self.marquee.prune(timeline, *selected);
         if let Some(track) = selected.and_then(|id| timeline.track_for_clip(id)) {
@@ -160,7 +165,11 @@ impl TimelineView {
             input.command.or_else(|| self.keyboard_command(ui))
         };
         let track_result = input.add_track.map_or(Ok(()), |kind| {
-            let id = timeline.add_track(kind)?;
+            let before = timeline
+                .tracks()
+                .get(timeline.tracks().len() / 2)
+                .map(|track| track.id);
+            let id = timeline.add_track_before(kind, before)?;
             self.reveal_added_track(id);
             *selected = None;
             Ok(())
@@ -210,6 +219,8 @@ impl TimelineView {
             clipboard_feedback: self.clipboard_feedback.take(),
             add_material: input.add_material,
             material_drop,
+            volume_changed: self.volume_changed,
+            volume_preview: self.volume_preview,
         }
     }
 
@@ -294,7 +305,6 @@ impl TimelineView {
         if track_space <= 20.0 {
             return Ok(None);
         }
-        let edge_band = ((track_space - TRACK_HEIGHT) * 0.5).clamp(6.0, BAND_HEIGHT);
         let (rect, response) = ui.allocate_exact_size(
             vec2(ui.available_width().max(TRACK_HEADER + 1.0), height),
             Sense::hover(),
@@ -312,6 +322,10 @@ impl TimelineView {
             .max(MIN_HORIZON);
         let material_drag = material_drop::is_dragging(ui.ctx());
         let boundaries = Rows::measure(timeline);
+        // Keep the complete track group vertically centered while it fits.
+        // Once the rows need scrolling, retain a small reachable edge band.
+        let track_height = boundaries.last().copied().unwrap_or_default();
+        let edge_band = ((track_space - track_height) * 0.5).max(6.0);
         let mut rows = Rows {
             area: Rect::from_min_max(pos2(rect.left(), content.top() + RULER_HEIGHT), content.max),
             edge_band,
@@ -845,6 +859,9 @@ impl TimelineView {
         let painter = painter.with_clip_rect(view.rect.intersect(rows.area));
         match drag.propose(timeline, delta, time, target, pointer.y) {
             Ok(edit) => {
+                if let Some(value) = edit.volume_value() {
+                    self.volume_preview = Some((drag.id, value));
+                }
                 if let Some(index) = timeline
                     .tracks()
                     .iter()
@@ -853,6 +870,7 @@ impl TimelineView {
                     paint_draft(&edit, &painter, view, rows.rect(view, index), &colors);
                 }
                 if released {
+                    self.volume_changed = matches!(drag.kind, Gesture::Volume { .. });
                     let destination = edit.track;
                     edit.commit(timeline)?;
                     self.track = Some(destination);

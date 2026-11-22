@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -519,6 +519,8 @@ mod preview_quality_tests {
 }
 
 pub(super) struct MediaSlice {
+    /// Stable timeline clip id used to route live volume automation to one source.
+    pub id: u64,
     pub path: PathBuf,
     pub range: std::ops::Range<u64>,
     pub volume_db_tenths: i16,
@@ -611,16 +613,33 @@ impl Preview {
                 errors: session.errors_tx.clone(),
                 ctx: ctx.clone(),
             };
-            if let Err(error) = thread::Builder::new()
+            match thread::Builder::new()
                 .name("preview-audio".into())
                 .spawn(move || audio.run())
             {
-                session.playback.audio_ready.store(true, Ordering::Release);
-                self.audio_error = Some(format!("无法启动音频预览（{error}）"));
+                Ok(worker) => session.audio_worker = Some(worker),
+                Err(error) => {
+                    session.playback.audio_ready.store(true, Ordering::Release);
+                    self.audio_error = Some(format!("无法启动音频预览（{error}）"));
+                }
             }
         }
         self.session = Some(session);
         ctx.request_repaint();
+    }
+
+    /// Changes one source's gain without restarting FFmpeg or the video decoder.
+    pub(super) fn set_live_volume(&mut self, source_id: u64, db_tenths: i16) {
+        if let Some(session) = &self.session {
+            session
+                .playback
+                .live_volume_source
+                .store(source_id, Ordering::Release);
+            session
+                .playback
+                .live_gain_db_tenths
+                .store(db_tenths, Ordering::Release);
+        }
     }
 
     pub fn stop(&mut self) {
@@ -770,6 +789,8 @@ mod preview_shutdown_tests {
 struct PlaybackClock {
     epoch: OnceLock<Instant>,
     audio_ready: AtomicBool,
+    live_volume_source: AtomicU64,
+    live_gain_db_tenths: AtomicI16,
 }
 
 #[derive(Clone, Copy)]
@@ -799,6 +820,7 @@ struct PreviewSession {
     video: Arc<Decoder>,
     video_worker: Option<thread::JoinHandle<()>>,
     audio: Arc<Decoder>,
+    audio_worker: Option<thread::JoinHandle<()>>,
     first_frame_at: Option<Instant>,
     frames: Option<Receiver<VideoFrame>>,
     pending: Option<VideoFrame>,
@@ -822,11 +844,13 @@ impl PreviewSession {
             composition_size,
             playback: Arc::new(PlaybackClock {
                 audio_ready: AtomicBool::new(!has_audio),
+                live_volume_source: AtomicU64::new(u64::MAX),
                 ..PlaybackClock::default()
             }),
             video: Arc::default(),
             video_worker: None,
             audio: Arc::default(),
+            audio_worker: None,
             first_frame_at: (!has_video).then(Instant::now),
             frames: None,
             pending: None,
