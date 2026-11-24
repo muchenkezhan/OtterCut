@@ -101,6 +101,15 @@ pub mod key {
     pub const RECORD_SAVING: MessageKey = MessageKey("toolbar.record_saving");
     pub const MICROPHONE_ENABLE: MessageKey = MessageKey("toolbar.microphone_enable");
     pub const MICROPHONE_DISABLE: MessageKey = MessageKey("toolbar.microphone_disable");
+    pub const CAMERA_ENABLE: MessageKey = MessageKey("toolbar.camera_enable");
+    pub const CAMERA_DISABLE: MessageKey = MessageKey("toolbar.camera_disable");
+    pub const CAMERA_PREVIEW_SHOW: MessageKey = MessageKey("toolbar.camera_preview_show");
+    pub const CAMERA_PREVIEW_HIDE: MessageKey = MessageKey("toolbar.camera_preview_hide");
+    pub const CAMERA_PREVIEW_SHAPE: MessageKey = MessageKey("device.camera_preview_shape");
+    pub const CAMERA_PREVIEW_CIRCLE: MessageKey = MessageKey("device.camera_preview_circle");
+    pub const CAMERA_PREVIEW_SQUARE: MessageKey = MessageKey("device.camera_preview_square");
+    pub const CAMERA_PREVIEW_UNAVAILABLE: MessageKey =
+        MessageKey("toolbar.camera_preview_unavailable");
     pub const CLICK_FOLLOW_ENABLE: MessageKey = MessageKey("toolbar.click_follow_enable");
     pub const CLICK_FOLLOW_DISABLE: MessageKey = MessageKey("toolbar.click_follow_disable");
     pub const EDITOR_OPEN: MessageKey = MessageKey("toolbar.editor_open");
@@ -118,6 +127,12 @@ pub mod key {
     pub const SOURCE_REFRESH: MessageKey = MessageKey("source.refresh");
     pub const SOURCE_EMPTY: MessageKey = MessageKey("source.empty");
     pub const SOURCE_REMAINING: MessageKey = MessageKey("source.remaining");
+    pub const SOURCE_PICKER: MessageKey = MessageKey("source.picker");
+    pub const SOURCE_NOT_SELECTED: MessageKey = MessageKey("source.not_selected");
+    pub const SOURCE_SELECTED_DISPLAY: MessageKey = MessageKey("source.selected_display");
+    pub const SOURCE_SELECTED_WINDOW: MessageKey = MessageKey("source.selected_window");
+    pub const SOURCE_SAVE_TO: MessageKey = MessageKey("source.save_to");
+    pub const SOURCE_CHANGE_FOLDER: MessageKey = MessageKey("source.change_folder");
     pub const DEVICE_TITLE: MessageKey = MessageKey("device.title");
     pub const DEVICE_REFRESH: MessageKey = MessageKey("device.refresh");
     pub const DEVICE_LOCKED: MessageKey = MessageKey("device.locked");
@@ -146,6 +161,7 @@ pub mod key {
     pub const DEVICE_OPEN_CAMERA: MessageKey = MessageKey("device.open_camera");
     pub const DEVICE_CLOSE_CAMERA: MessageKey = MessageKey("device.close_camera");
     pub const DEVICE_OPENING_CAMERA: MessageKey = MessageKey("device.opening_camera");
+    pub const DEVICE_PREVIEW_EXTERNAL: MessageKey = MessageKey("device.preview_external");
     pub const EXPORT_SETTINGS: MessageKey = MessageKey("export.settings");
     pub const EXPORT_OUTPUT: MessageKey = MessageKey("export.output");
     pub const EXPORT_TITLE: MessageKey = MessageKey("export.title");
@@ -218,6 +234,14 @@ pub mod key {
         RECORD_SAVING,
         MICROPHONE_ENABLE,
         MICROPHONE_DISABLE,
+        CAMERA_ENABLE,
+        CAMERA_DISABLE,
+        CAMERA_PREVIEW_SHOW,
+        CAMERA_PREVIEW_HIDE,
+        CAMERA_PREVIEW_SHAPE,
+        CAMERA_PREVIEW_CIRCLE,
+        CAMERA_PREVIEW_SQUARE,
+        CAMERA_PREVIEW_UNAVAILABLE,
         CLICK_FOLLOW_ENABLE,
         CLICK_FOLLOW_DISABLE,
         EDITOR_OPEN,
@@ -235,6 +259,12 @@ pub mod key {
         SOURCE_REFRESH,
         SOURCE_EMPTY,
         SOURCE_REMAINING,
+        SOURCE_PICKER,
+        SOURCE_NOT_SELECTED,
+        SOURCE_SELECTED_DISPLAY,
+        SOURCE_SELECTED_WINDOW,
+        SOURCE_SAVE_TO,
+        SOURCE_CHANGE_FOLDER,
         DEVICE_TITLE,
         DEVICE_REFRESH,
         DEVICE_LOCKED,
@@ -263,6 +293,7 @@ pub mod key {
         DEVICE_OPEN_CAMERA,
         DEVICE_CLOSE_CAMERA,
         DEVICE_OPENING_CAMERA,
+        DEVICE_PREVIEW_EXTERNAL,
         EXPORT_SETTINGS,
         EXPORT_OUTPUT,
         EXPORT_TITLE,
@@ -447,6 +478,14 @@ fn message_zh(key: MessageKey) -> &'static str {
         "toolbar.record_saving" => "正在保存",
         "toolbar.microphone_enable" => "开启麦克风",
         "toolbar.microphone_disable" => "关闭麦克风",
+        "toolbar.camera_enable" => "开启摄像头录制",
+        "toolbar.camera_disable" => "关闭摄像头录制",
+        "toolbar.camera_preview_show" => "显示摄像头预览",
+        "toolbar.camera_preview_hide" => "隐藏摄像头预览",
+        "device.camera_preview_shape" => "预览形状",
+        "device.camera_preview_circle" => "圆形",
+        "device.camera_preview_square" => "正方形",
+        "toolbar.camera_preview_unavailable" => "当前录制来源无法显示悬浮预览",
         "toolbar.click_follow_enable" => "开启点击跟随",
         "toolbar.click_follow_disable" => "关闭点击跟随",
         "toolbar.editor_open" => "打开剪辑台",
@@ -464,6 +503,12 @@ fn message_zh(key: MessageKey) -> &'static str {
         "source.refresh" => "刷新来源",
         "source.empty" => "当前没有可录制的来源。打开目标窗口后可刷新列表。",
         "source.remaining" => "右侧还有 {count} 张",
+        "source.picker" => "系统选择器…",
+        "source.not_selected" => "尚未选择来源",
+        "source.selected_display" => "已选择屏幕",
+        "source.selected_window" => "已选择窗口",
+        "source.save_to" => "保存至",
+        "source.change_folder" => "更改…",
         "device.title" => "设备设置",
         "device.refresh" => "刷新设备",
         "device.locked" => "录制中 · 设备已锁定",
@@ -492,6 +537,7 @@ fn message_zh(key: MessageKey) -> &'static str {
         "device.open_camera" => "打开摄像头预览",
         "device.close_camera" => "关闭摄像头预览",
         "device.opening_camera" => "正在打开摄像头…",
+        "device.preview_external" => "预览在独立窗口显示",
         "export.settings" => "导出设置",
         "export.output" => "输出文件",
         "export.title" => "标题",
@@ -568,6 +614,16 @@ fn message_en(key: MessageKey) -> &'static str {
         "toolbar.record_saving" => "Saving",
         "toolbar.microphone_enable" => "Enable microphone",
         "toolbar.microphone_disable" => "Disable microphone",
+        "toolbar.camera_enable" => "Enable camera recording",
+        "toolbar.camera_disable" => "Disable camera recording",
+        "toolbar.camera_preview_show" => "Show camera preview",
+        "toolbar.camera_preview_hide" => "Hide camera preview",
+        "device.camera_preview_shape" => "Preview shape",
+        "device.camera_preview_circle" => "Circle",
+        "device.camera_preview_square" => "Square",
+        "toolbar.camera_preview_unavailable" => {
+            "Floating camera preview is unavailable for this recording source"
+        }
         "toolbar.click_follow_enable" => "Enable click follow",
         "toolbar.click_follow_disable" => "Disable click follow",
         "toolbar.editor_open" => "Open editor",
@@ -585,6 +641,12 @@ fn message_en(key: MessageKey) -> &'static str {
         "source.refresh" => "Refresh sources",
         "source.empty" => "No recordable sources. Open a target window and refresh the list.",
         "source.remaining" => "{count} more on the right",
+        "source.picker" => "System picker…",
+        "source.not_selected" => "No source selected",
+        "source.selected_display" => "Display selected",
+        "source.selected_window" => "Window selected",
+        "source.save_to" => "Save to",
+        "source.change_folder" => "Change…",
         "device.title" => "Device settings",
         "device.refresh" => "Refresh devices",
         "device.locked" => "Recording · devices locked",
@@ -613,6 +675,7 @@ fn message_en(key: MessageKey) -> &'static str {
         "device.open_camera" => "Open camera preview",
         "device.close_camera" => "Close camera preview",
         "device.opening_camera" => "Opening camera…",
+        "device.preview_external" => "Preview opens in a separate window",
         "export.settings" => "Export settings",
         "export.output" => "Output file",
         "export.title" => "Title",

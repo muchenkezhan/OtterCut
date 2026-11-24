@@ -149,6 +149,7 @@ pub(super) async fn record(
         .context("无法保存录像，目标位置可能已存在同名文件")?;
     Ok(Some(SavedRecording {
         path: request.output,
+        camera_path: None,
         warning: None,
     }))
 }

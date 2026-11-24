@@ -43,6 +43,16 @@ pub fn run(cli: Cli) -> Result<()> {
         output,
         microphone: mic,
         duration: seconds.map(|seconds| Duration::from_secs(seconds.get())),
+        #[cfg(target_os = "macos")]
+        source: None,
+        #[cfg(target_os = "macos")]
+        microphone_device: None,
+        #[cfg(target_os = "macos")]
+        camera_device: None,
+        #[cfg(target_os = "macos")]
+        camera_mode: None,
+        #[cfg(target_os = "macos")]
+        click_follow: false,
     };
     let result = platform::record(request, &stopped, || {
         eprintln!("{}", Locale::preferred().text(key::CLI_RECORDING_STARTED));

@@ -52,6 +52,20 @@ pub(crate) enum Icon {
     Audio,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Microphone,
+    #[cfg(target_os = "macos")]
+    Camera,
+    #[cfg(target_os = "macos")]
+    Eye,
+    #[cfg(target_os = "macos")]
+    EyeOff,
+    #[cfg(target_os = "macos")]
+    Display,
+    #[cfg(target_os = "macos")]
+    Window,
+    #[cfg(target_os = "macos")]
+    ClickFollow,
+    #[cfg(target_os = "macos")]
+    Settings,
     Captions,
     Text,
     Timeline,
@@ -333,6 +347,75 @@ impl Icon {
                 ]);
                 line((0.0, 4.0), (0.0, 7.0));
                 line((-2.5, 7.0), (2.5, 7.0));
+            }
+            #[cfg(target_os = "macos")]
+            Self::Camera => {
+                rect((-8.0, -5.3), (2.8, 5.3), 2_u8);
+                path(&[(2.1, -1.5), (7.5, -4.5), (7.5, 4.5), (2.1, 1.5)]);
+            }
+            #[cfg(target_os = "macos")]
+            Self::Eye | Self::EyeOff => {
+                for y in [-7.0, 7.0] {
+                    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                        [
+                            point(-8.0, 0.0),
+                            point(-3.5, y),
+                            point(3.5, y),
+                            point(8.0, 0.0),
+                        ],
+                        false,
+                        Color32::TRANSPARENT,
+                        stroke,
+                    ));
+                }
+                painter.circle_stroke(center, 2.2 * scale, stroke);
+                if matches!(self, Self::EyeOff) {
+                    line((-7.2, -7.2), (7.2, 7.2));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Self::Display => {
+                rect((-8.0, -5.4), (8.0, 4.2), 1_u8);
+                line((0.0, 4.2), (0.0, 7.2));
+                line((-4.0, 7.2), (4.0, 7.2));
+            }
+            #[cfg(target_os = "macos")]
+            Self::Window => {
+                rect((-7.4, -6.2), (7.4, 6.2), 2_u8);
+                line((-7.0, -2.3), (7.0, -2.3));
+                for x in [-4.5, -1.6, 1.3] {
+                    painter.circle_filled(point(x, -4.2), 0.7 * scale, color);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Self::ClickFollow => {
+                path(&[
+                    (-6.0, -7.0),
+                    (5.8, 0.4),
+                    (0.3, 1.7),
+                    (3.5, 7.0),
+                    (0.4, 8.5),
+                    (-2.8, 2.9),
+                    (-6.0, 5.4),
+                    (-6.0, -7.0),
+                ]);
+                painter.circle_stroke(point(4.0, -5.0), 2.0 * scale, stroke);
+            }
+            #[cfg(target_os = "macos")]
+            Self::Settings => {
+                painter.circle_stroke(center, 5.4 * scale, stroke);
+                painter.circle_stroke(center, 1.9 * scale, stroke);
+                for step in 0..8 {
+                    let angle = step as f32 * FRAC_PI_4;
+                    let direction = vec2(angle.cos(), angle.sin());
+                    painter.line_segment(
+                        [
+                            center + direction * (7.0 * scale),
+                            center + direction * (9.0 * scale),
+                        ],
+                        stroke,
+                    );
+                }
             }
             Self::Stop => {
                 painter.rect_filled(

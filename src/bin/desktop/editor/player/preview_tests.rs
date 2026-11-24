@@ -264,7 +264,13 @@ fn video_frame_survives_quality_and_subtitle_preview_changes() {
 
     player.toggle(&mut position, timeline.duration());
     sync(&mut player, &timeline, &mut library, position, None);
-    wait_for_preview(&ctx, &mut player, &mut position, timeline.duration());
+    wait_for_preview_without_overlay(
+        &ctx,
+        &mut player,
+        &mut position,
+        timeline.duration(),
+        moved,
+    );
     assert!(!player.texture_excludes(moved));
     position += 40_000;
     player.playing = false;
@@ -403,12 +409,35 @@ fn wait_for_preview(
     position: &mut u64,
     duration: u64,
 ) -> ImageData {
+    wait_for_preview_with(ctx, player, position, duration, |_| true)
+}
+
+fn wait_for_preview_without_overlay(
+    ctx: &egui::Context,
+    player: &mut Player,
+    position: &mut u64,
+    duration: u64,
+    overlay: u64,
+) -> ImageData {
+    wait_for_preview_with(ctx, player, position, duration, |player| {
+        !player.texture_excludes(overlay)
+    })
+}
+
+fn wait_for_preview_with(
+    ctx: &egui::Context,
+    player: &mut Player,
+    position: &mut u64,
+    duration: u64,
+    ready: impl Fn(&Player) -> bool,
+) -> ImageData {
     let started = Instant::now();
     loop {
         let output = ctx.run_ui(egui::RawInput::default(), |_| {
             player.advance(ctx, position, duration);
         });
         if let Some(texture) = player.texture()
+            && ready(player)
             && let Some((_, image)) = output
                 .textures_delta
                 .set

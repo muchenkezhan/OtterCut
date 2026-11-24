@@ -156,11 +156,10 @@ impl Clip {
         if self.timeline_duration_us > 0 {
             return self.timeline_duration_us;
         }
-        self.source_end
-            .saturating_sub(self.source_start)
-            .saturating_mul(1000)
-            .checked_div(u64::from(self.speed_milli.max(1)))
-            .unwrap_or(u64::MAX)
+        timeline_duration(
+            self.source_end.saturating_sub(self.source_start),
+            self.speed_milli.max(1),
+        )
     }
 
     pub fn set_speed(&mut self, speed_milli: u16) {
@@ -168,12 +167,11 @@ impl Clip {
         self.timeline_duration_us = if self.speed_milli == 1000 {
             0
         } else {
-            self.source_end
-                .saturating_sub(self.source_start)
-                .saturating_mul(1000)
-                .checked_div(u64::from(self.speed_milli))
-                .unwrap_or(1)
-                .max(1)
+            timeline_duration(
+                self.source_end.saturating_sub(self.source_start),
+                self.speed_milli,
+            )
+            .max(1)
         };
     }
 
@@ -256,6 +254,11 @@ impl Clip {
         }
         Ok(())
     }
+}
+
+fn timeline_duration(source_duration: u64, speed_milli: u16) -> u64 {
+    let duration = u128::from(source_duration) * 1000 / u128::from(speed_milli);
+    u64::try_from(duration).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

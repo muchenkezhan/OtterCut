@@ -9,8 +9,16 @@ fn main() {
     }
 
     let source = "src/platform/macos/capture.m";
+    let camera_source = "src/platform/macos/camera_capture.m";
+    let camera_header = "src/platform/macos/camera_capture.h";
+    let cursor_source = "src/platform/macos/cursor_tracking.m";
+    let cursor_header = "src/platform/macos/cursor_tracking.h";
     let info_plist = "src/platform/macos/Info.plist";
     println!("cargo:rerun-if-changed={source}");
+    println!("cargo:rerun-if-changed={camera_source}");
+    println!("cargo:rerun-if-changed={camera_header}");
+    println!("cargo:rerun-if-changed={cursor_source}");
+    println!("cargo:rerun-if-changed={cursor_header}");
     println!("cargo:rerun-if-changed={info_plist}");
 
     let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
@@ -37,8 +45,14 @@ fn main() {
             "-framework",
             "CoreMedia",
             "-framework",
+            "CoreGraphics",
+            "-framework",
+            "QuartzCore",
+            "-framework",
             "ScreenCaptureKit",
             source,
+            camera_source,
+            cursor_source,
             "-o",
         ])
         .arg(output)
