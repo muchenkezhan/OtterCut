@@ -386,8 +386,14 @@ impl<'a> Span<'a> {
         library: &mut Library,
         position: u64,
     ) -> Option<Result<PreviewPlan, String>> {
-        let audio_timeline_start = self.key.start;
-        let duration_us = self.key.end.saturating_sub(audio_timeline_start).max(1);
+        const CACHE_BEFORE_US: u64 = 500_000;
+        const CACHE_AFTER_US: u64 = 2_000_000;
+        let audio_timeline_start = position.saturating_sub(CACHE_BEFORE_US).max(self.key.start);
+        let audio_timeline_end = position
+            .saturating_add(CACHE_AFTER_US)
+            .min(self.key.end)
+            .max(audio_timeline_start.saturating_add(1));
+        let duration_us = audio_timeline_end.saturating_sub(audio_timeline_start).max(1);
         let mut audio = Vec::new();
         for source in &self.key.audio {
             let info = match library.request(&source.path)? {
@@ -397,7 +403,7 @@ impl<'a> Span<'a> {
             if info.has_audio
                 && let Some(slice) = source.slice(
                     audio_timeline_start,
-                    self.key.end,
+                    audio_timeline_end,
                     info.duration_us,
                     false,
                 )
@@ -484,8 +490,10 @@ pub(super) struct Player {
     active: Option<Active>,
     scrubbing: bool,
     resume_after_scrub: bool,
+    scrub_audio_enabled: bool,
     retain_frame_on_sync: bool,
     last_scrub_audio: Option<Instant>,
+    last_scrub_preview: Option<Instant>,
     scrub_audio_prepared: bool,
     scrub_audio_stop_at: Option<Instant>,
 }
@@ -504,8 +512,10 @@ impl Player {
     pub(super) fn reset(&mut self) {
         self.scrubbing = false;
         self.resume_after_scrub = false;
+        self.scrub_audio_enabled = false;
         self.retain_frame_on_sync = false;
         self.last_scrub_audio = None;
+        self.last_scrub_preview = None;
         self.scrub_audio_prepared = false;
         self.scrub_audio_stop_at = None;
         self.active = None;
@@ -518,10 +528,12 @@ impl Player {
         }
         self.scrubbing = true;
         self.resume_after_scrub = self.playing;
+        self.scrub_audio_enabled = self.playing;
         self.playing = false;
         self.active = None;
         self.retain_frame_on_sync = true;
         self.last_scrub_audio = None;
+        self.last_scrub_preview = None;
         self.scrub_audio_stop_at = None;
         self.preview.stop();
     }
@@ -533,8 +545,10 @@ impl Player {
         self.scrubbing = false;
         self.playing = self.resume_after_scrub;
         self.resume_after_scrub = false;
+        self.scrub_audio_enabled = false;
         let had_scrub_audio = self.last_scrub_audio.is_some();
         self.last_scrub_audio = None;
+        self.scrub_audio_prepared = false;
         self.active = None;
         self.scrub_audio_stop_at = had_scrub_audio.then(|| Instant::now() + Duration::from_millis(400));
     }
@@ -546,7 +560,7 @@ impl Player {
         library: &mut Library,
         position: u64,
     ) {
-        if !self.scrubbing {
+        if !self.scrubbing || !self.scrub_audio_enabled {
             return;
         }
         let now = Instant::now();
@@ -585,7 +599,7 @@ impl Player {
         library: &mut Library,
         position: u64,
     ) {
-        if self.scrub_audio_prepared {
+        if !self.scrubbing || !self.scrub_audio_enabled || self.scrub_audio_prepared {
             return;
         }
         let Some(tools) = tools else {
@@ -606,6 +620,7 @@ impl Player {
             plan.audio,
             plan.duration_us,
             plan.audio_timeline_start,
+            plan.audio_position,
         );
     }
 
@@ -715,7 +730,13 @@ impl Player {
             self.preview.stop_scrub_audio();
             self.scrub_audio_stop_at = None;
         }
-        if self.scrubbing {
+        if self.scrubbing
+            && self
+                .last_scrub_preview
+                .is_some_and(|last| {
+                    Instant::now().duration_since(last) < Duration::from_millis(50)
+                })
+        {
             return None;
         }
         let Some(span) = span else {
@@ -805,6 +826,9 @@ impl Player {
                         }
                     } else {
                         self.preview.start(tools, ctx, plan, self.playing);
+                        if self.scrubbing {
+                            self.last_scrub_preview = Some(Instant::now());
+                        }
                     }
                     active.error = None;
                     active.requested = true;
@@ -823,3 +847,4 @@ impl Player {
 #[cfg(test)]
 #[path = "player/preview_tests.rs"]
 mod preview_tests;
+

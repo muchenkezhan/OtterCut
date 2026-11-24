@@ -1235,6 +1235,11 @@ mod tests {
             volume_db_tenths: 0,
             fade_in_us: 0,
             fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
             text: None,
         }
     }
@@ -1472,3 +1477,4 @@ mod tests {
         assert_eq!(timeline.clips()[0].start, HISTORY_LIMIT as u64);
     }
 }
+

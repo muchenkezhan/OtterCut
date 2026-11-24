@@ -32,7 +32,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PREVIEW_TICK: Duration = Duration::from_millis(15);
 const USECS_PER_SEC: u64 = 1_000_000;
 const THUMBNAIL_SIZE: [usize; 2] = [320, 180];
-const PREVIEW_THUMBNAIL_SIZE: [usize; 2] = [640, 360];
+const PREVIEW_THUMBNAIL_SIZE: [usize; 2] = [960, 540];
 const FILMSTRIP_SIZE: [usize; 2] = [144, 81];
 const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_CACHE_CAPACITY: usize = 8;
@@ -846,7 +846,13 @@ impl Preview {
             return;
         }
         if self.scrub_audio.is_none() {
-            self.scrub_audio = ScrubAudio::new().ok();
+            match ScrubAudio::new() {
+                Ok(audio) => self.scrub_audio = Some(audio),
+                Err(error) => {
+                    self.audio_error = Some(format!("无法启动拖动音频（{error}）"));
+                    return;
+                }
+            }
         }
         if let Some(audio) = &self.scrub_audio {
             audio.play(
@@ -865,15 +871,28 @@ impl Preview {
         sources: Vec<MediaSlice>,
         duration_us: u64,
         timeline_start: u64,
+        position: u64,
     ) {
         if sources.is_empty() {
             return;
         }
         if self.scrub_audio.is_none() {
-            self.scrub_audio = ScrubAudio::new().ok();
+            match ScrubAudio::new() {
+                Ok(audio) => self.scrub_audio = Some(audio),
+                Err(error) => {
+                    self.audio_error = Some(format!("无法启动拖动音频（{error}）"));
+                    return;
+                }
+            }
         }
         if let Some(audio) = &self.scrub_audio {
-            audio.prepare(&tools.ffmpeg, sources, duration_us, timeline_start);
+            audio.prepare(
+                &tools.ffmpeg,
+                sources,
+                duration_us,
+                timeline_start,
+                position,
+            );
         }
     }
 
@@ -1610,3 +1629,4 @@ fn blend_rgba(
     }
     pixels[index + 3] = 0xff;
 }
+

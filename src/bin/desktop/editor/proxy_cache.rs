@@ -27,6 +27,7 @@ struct ProxyResult {
 }
 
 pub(super) struct ProxyCache {
+    default_root: PathBuf,
     project_root: Option<PathBuf>,
     requests: Option<SyncSender<ProxyRequest>>,
     results: Receiver<ProxyResult>,
@@ -35,7 +36,7 @@ pub(super) struct ProxyCache {
 }
 
 impl ProxyCache {
-    pub(super) fn new(tools: Option<MediaTools>, ctx: &egui::Context) -> Self {
+    pub(super) fn new(tools: Option<MediaTools>, ctx: &egui::Context, directory: &Path) -> Self {
         let (requests, incoming) = mpsc::sync_channel(PROXY_QUEUE_LIMIT);
         let (outgoing, results) = mpsc::channel();
         let requests = tools.as_ref().and_then(|tools| {
@@ -63,7 +64,8 @@ impl ProxyCache {
             Some(requests)
         });
         Self {
-            project_root: None,
+            default_root: directory.join(".ottercut-cache").join("proxy"),
+            project_root: Some(directory.join(".ottercut-cache").join("proxy")),
             requests,
             results,
             pending: HashSet::new(),
@@ -72,7 +74,9 @@ impl ProxyCache {
     }
 
     pub(super) fn set_project(&mut self, project: Option<&Path>) {
-        self.project_root = project.map(|path| path.with_extension("cache").join("proxy"));
+        self.project_root = project
+            .map(|path| path.with_extension("cache").join("proxy"))
+            .or_else(|| Some(self.default_root.clone()));
         self.pending.clear();
         self.ready.clear();
     }
@@ -190,3 +194,4 @@ fn write_proxy(tools: &MediaTools, request: &ProxyRequest) -> anyhow::Result<()>
     std::fs::rename(partial, &request.target)?;
     Ok(())
 }
+

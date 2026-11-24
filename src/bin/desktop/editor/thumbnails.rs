@@ -19,6 +19,7 @@ pub(super) struct Thumbnails {
     worker: Option<Worker>,
     pending: HashSet<FrameKey>,
     cache: HashMap<FrameKey, Cached>,
+    latest_requested: HashMap<PathBuf, u64>,
     mode: Mode,
     order: u64,
 }
@@ -132,6 +133,7 @@ impl Thumbnails {
             worker: tools.and_then(|tools| Worker::start(tools, ctx.clone(), mode)),
             pending: HashSet::new(),
             cache: HashMap::new(),
+            latest_requested: HashMap::new(),
             mode,
             order: 0,
         }
@@ -148,6 +150,16 @@ impl Thumbnails {
             path: path.to_owned(),
             timestamp_us,
         };
+        if matches!(self.mode, Mode::Preview) {
+            // Preview requests are latest-wins while scrubbing. Do not let old
+            // timestamps permanently occupy the pending set after the worker
+            // coalesces them from its queue.
+            self.pending.retain(|pending| {
+                pending.path != key.path || pending.timestamp_us == key.timestamp_us
+            });
+            self.latest_requested
+                .insert(key.path.clone(), key.timestamp_us);
+        }
         if !self.cache.contains_key(&key)
             && !self.pending.contains(&key)
             && worker.requests.try_send(key.clone()).is_ok()
@@ -167,23 +179,25 @@ impl Thumbnails {
         tolerance_us: u64,
     ) -> Option<egui::TextureHandle> {
         self.poll_updates();
-        let key = self
+        let nearest = self
             .cache
             .keys()
             .filter(|key| key.path == path && key.timestamp_us.abs_diff(timestamp_us) <= tolerance_us)
             .min_by_key(|key| key.timestamp_us.abs_diff(timestamp_us))
             .cloned();
-        if let Some(key) = key {
+        let nearest_texture = if let Some(key) = nearest {
             self.order += 1;
-            let texture = self.cache.get_mut(&key).and_then(|cached| {
+            self.cache.get_mut(&key).and_then(|cached| {
                 cached.last_used = self.order;
                 cached.texture.clone()
-            });
-            if texture.is_some() {
-                return texture;
-            }
-        }
-        self.frame(path, timestamp_us).cloned()
+            })
+        } else {
+            None
+        };
+        // Show a nearby cached frame immediately, while always queueing the
+        // exact requested timestamp for the next repaint.
+        let exact_texture = self.frame(path, timestamp_us).cloned();
+        nearest_texture.or(exact_texture)
     }
 
     fn poll_updates(&mut self) {
@@ -192,6 +206,14 @@ impl Thumbnails {
         };
         for (key, image) in worker.updates.try_iter() {
             self.pending.remove(&key);
+            if matches!(self.mode, Mode::Preview)
+                && self
+                    .latest_requested
+                    .get(&key.path)
+                    .is_some_and(|latest| *latest != key.timestamp_us)
+            {
+                continue;
+            }
             if self.cache.len() >= self.mode.cache_limit()
                 && let Some(oldest) = self
                     .cache
@@ -219,3 +241,4 @@ impl Thumbnails {
         }
     }
 }
+

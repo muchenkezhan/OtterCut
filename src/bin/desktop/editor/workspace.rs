@@ -123,7 +123,7 @@ impl Workspace {
         let library = Library::new(directory, tools.as_ref(), ctx);
         let thumbnails = Thumbnails::new(tools.clone(), ctx);
         let preview_thumbnails = Thumbnails::preview(tools.clone(), ctx);
-        let proxy_cache = ProxyCache::new(tools.clone(), ctx);
+        let proxy_cache = ProxyCache::new(tools.clone(), ctx, library.directory());
         Self {
             logo,
             docking: Some(if cfg!(test) {
@@ -367,9 +367,6 @@ impl Workspace {
 
     fn sync_preview(&mut self, ctx: &egui::Context) {
         self.media_error = None;
-        if self.player.is_scrubbing() {
-            return;
-        }
         self.prepare_current_proxy();
         if self.cursor_effect.end_us == 1 && self.duration() > 1 {
             self.cursor_effect.end_us = self.duration();
@@ -1327,8 +1324,17 @@ impl Workspace {
         if let Some(message) = transition_notice {
             self.show_notice(message, false);
         }
+        if input.playhead_seek {
+            self.player.begin_seek();
+        }
         if !self.timeline.is_empty() {
             self.position = position;
+        }
+        if input.playhead_seek {
+            self.prepare_and_play_scrub_audio(self.position);
+        }
+        if input.playhead_seek_finished {
+            self.player.end_seek();
         }
         if old_selection != self.selected_clip
             && let Some(id) = self.selected_clip
@@ -1351,7 +1357,7 @@ impl Workspace {
                 self.player.playing = false;
                 self.player.reset();
             }
-        } else if self.position != old_position {
+        } else if self.position != old_position && !input.playhead_seek {
             self.player.reset();
         }
     }
@@ -1454,12 +1460,13 @@ impl Workspace {
         } else if self.tools_error.is_some()
             || self.media_error.is_some()
             || self.player.error().is_some()
+            || self.player.audio_error().is_some()
         {
             "预览不可用"
         } else {
             self.player.blank_message().unwrap_or("正在读取预览…")
         };
-        let preview_placeholder = if self.player.is_scrubbing() || self.player.texture().is_none() {
+        let preview_placeholder = if self.player.texture().is_none() {
             self.preview_placeholder()
         } else {
             None
@@ -1476,10 +1483,11 @@ impl Workspace {
         let frame_excludes_text = selection.is_some_and(|(id, _)| self.player.texture_excludes(id));
         let title = self.preview_title();
         let preview_texture = if self.player.is_scrubbing() {
-            preview_placeholder
-                .as_ref()
-                .map(|(texture, _)| texture.clone())
-                .or_else(|| self.player.texture().cloned())
+            self.player.texture().cloned().or_else(|| {
+                preview_placeholder
+                    .as_ref()
+                    .map(|(texture, _)| texture.clone())
+            })
         } else {
             self.player
                 .texture()
@@ -1490,10 +1498,7 @@ impl Workspace {
             .player
             .texture_composition_size();
         let preview_size = if self.player.is_scrubbing() {
-            preview_placeholder
-                .as_ref()
-                .map(|(_, size)| *size)
-                .or(preview_size)
+            preview_size.or_else(|| preview_placeholder.as_ref().map(|(_, size)| *size))
         } else {
             preview_size.or_else(|| preview_placeholder.as_ref().map(|(_, size)| *size))
         };
@@ -1552,14 +1557,7 @@ impl Workspace {
             self.subtitle_canvas.cancel();
             self.player.begin_seek();
             self.position = seek;
-            if let Some(span) = Span::at(&self.timeline, self.position) {
-                self.player.play_scrub_audio(
-                    self.tools.as_ref(),
-                    span,
-                    &mut self.library,
-                    self.position,
-                );
-            }
+            self.prepare_and_play_scrub_audio(self.position);
         }
         if input.seek_finished {
             self.player.end_seek();
@@ -1583,7 +1581,7 @@ impl Workspace {
         };
         if let Some(texture) = self
             .preview_thumbnails
-            .nearest_frame(&path, timestamp_us, 500_000)
+            .nearest_frame(&path, timestamp_us, 120_000)
         {
             return Some((texture.clone(), Self::texture_size(&texture)));
         }
@@ -1600,10 +1598,49 @@ impl Workspace {
         {
             return Some((texture.clone(), Self::texture_size(&texture)));
         }
+        if !self.timeline.is_empty() {
+            return None;
+        }
         self.thumbnails
             .texture(&path)
             .cloned()
             .map(|texture| (texture.clone(), Self::texture_size(&texture)))
+    }
+
+    fn audio_span_at<'a>(
+        timeline: &'a Timeline,
+        library: &Library,
+        position: u64,
+    ) -> Option<Span<'a>> {
+        if timeline.is_empty() {
+            let path = library.selected_path()?;
+            let info = library.info(path)?;
+            Some(Span::for_asset(path, info))
+        } else {
+            Span::at(timeline, position)
+        }
+    }
+
+    fn prepare_and_play_scrub_audio(&mut self, position: u64) {
+        let Some(tools) = self.tools.clone() else {
+            return;
+        };
+        if let Some(span) = Self::audio_span_at(&self.timeline, &self.library, position) {
+            self.player.prepare_scrub_audio(
+                Some(&tools),
+                span,
+                &mut self.library,
+                position,
+            );
+        }
+        if let Some(span) = Self::audio_span_at(&self.timeline, &self.library, position) {
+            self.player.play_scrub_audio(
+                Some(&tools),
+                span,
+                &mut self.library,
+                position,
+            );
+        }
     }
 
     fn preview_title(&self) -> String {
@@ -1658,6 +1695,7 @@ impl Workspace {
                     return Some((clip.path.clone(), source_time, size));
                 }
             }
+            return None;
         }
         let path = self.library.selected_path()?.to_owned();
         let size = self
@@ -1670,7 +1708,9 @@ impl Workspace {
     }
 
     fn preview_proxy_path(&mut self) -> Option<PathBuf> {
-        if !self.player.playing || self.player.quality() == PreviewQuality::Full {
+        if self.player.quality() == PreviewQuality::Full
+            || (!self.player.playing && !self.player.is_scrubbing())
+        {
             return None;
         }
         let (path, _, _) = self.preview_source_at()?;
@@ -1704,10 +1744,7 @@ impl Workspace {
     }
 
     fn prepare_current_audio_cache(&mut self) {
-        if self.player.is_scrubbing() {
-            return;
-        }
-        let Some(span) = Span::at(&self.timeline, self.position) else {
+        let Some(span) = Self::audio_span_at(&self.timeline, &self.library, self.position) else {
             return;
         };
         self.player.prepare_scrub_audio(
@@ -1919,32 +1956,43 @@ impl Workspace {
         let colors = ui_theme::palette(ui.ctx());
         let projects = self.home_projects();
         let area = ui.available_rect_before_wrap();
-        let content_width = area.width().min(980.0);
-        let content_rect = egui::Rect::from_center_size(
-            area.center(),
-            vec2(content_width, area.height()),
+        let content_width = (area.width() - 32.0).clamp(0.0, 1120.0);
+        let content_rect = egui::Rect::from_center_size(area.center(), vec2(content_width, area.height()));
+        let background = egui::Color32::from_rgb(10, 13, 18);
+        let painter = ui.painter_at(area);
+        painter.rect_filled(area, 0.0, background);
+        painter.circle_filled(
+            egui::pos2(area.right() - 80.0, area.top() + 80.0),
+            190.0,
+            colors.accent.gamma_multiply(0.035),
         );
-        let background = egui::Color32::from_rgb(14, 18, 25);
-        ui.painter().rect_filled(area, 0.0, background);
+        painter.circle_filled(
+            egui::pos2(area.left() + 40.0, area.bottom() - 28.0),
+            120.0,
+            egui::Color32::from_rgb(34, 48, 72).gamma_multiply(0.22),
+        );
         let mut content = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
 
-        content.add_space(22.0);
+        content.add_space(18.0);
         content.horizontal(|ui| {
             ui.add(
                 egui::Image::new(&self.logo)
-                    .fit_to_exact_size(vec2(30.0, 30.0))
-                    .corner_radius(8.0),
+                    .fit_to_exact_size(vec2(34.0, 34.0))
+                    .corner_radius(10.0),
             );
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(PRODUCT_NAME).size(16.0).strong().color(colors.text));
-                ui.label(RichText::new("本地剪辑工程").size(11.0).color(colors.muted));
+                ui.label(RichText::new(PRODUCT_NAME).size(15.0).strong().color(colors.text));
+                ui.label(RichText::new("编辑工作台").size(11.0).color(colors.muted));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new("本地工程").size(11.0).color(colors.muted));
+                ui.add_space(14.0);
                 if ui
                     .add_sized(
-                        [112.0, 32.0],
-                        egui::Button::new(RichText::new("打开工程").size(12.0)),
+                        [118.0, 32.0],
+                        egui::Button::new(RichText::new("打开工程").size(12.0))
+                            .fill(colors.control),
                     )
                     .clicked()
                     && let Some(path) = rfd::FileDialog::new()
@@ -1957,61 +2005,109 @@ impl Workspace {
             });
         });
 
-        content.add_space(44.0);
+        content.add_space(40.0);
+        let hero_width = content.available_width();
+        let (hero, _) = content.allocate_exact_size(vec2(hero_width, 270.0), egui::Sense::hover());
+        let mut hero_ui = content.new_child(egui::UiBuilder::new().max_rect(hero));
+        let gap = 26.0;
+        let left_width = ((hero_width - gap) * 0.62).max(0.0);
+        let right_width = (hero_width - left_width - gap).max(0.0);
+        let left_rect = egui::Rect::from_min_size(hero.min, vec2(left_width, hero.height()));
+        let right_rect = egui::Rect::from_min_size(
+            egui::pos2(left_rect.right() + gap, hero.top()),
+            vec2(right_width, hero.height()),
+        );
+        let mut left = hero_ui.new_child(egui::UiBuilder::new().max_rect(left_rect));
         egui::Frame::new()
-            .fill(colors.surface)
-            .corner_radius(18.0)
+            .fill(colors.surface.gamma_multiply(0.48))
+            .corner_radius(16.0)
             .stroke(egui::Stroke::new(1.0, colors.border))
-            .inner_margin(28.0)
-            .show(&mut content, |ui| {
+            .inner_margin(20.0)
+            .show(&mut left, |ui| {
+                ui.label(
+                    RichText::new("从一条空时间线开始")
+                        .size(12.0)
+                        .color(colors.accent),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("把下一段剪辑\n放在这里")
+                        .size(32.0)
+                        .strong()
+                        .color(colors.text),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("录制、整理素材，然后把想法剪成一条清晰的时间线。")
+                        .size(13.0)
+                        .color(colors.muted),
+                );
+                ui.add_space(14.0);
+                if Self::gradient_action_button(ui, "创建项目", "从空白时间线开始") {
+                    self.new_project(ui.ctx());
+                }
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
+                    if ui
+                        .add_sized(
+                            [124.0, 36.0],
+                            egui::Button::new(RichText::new("打开工程").size(13.0))
+                                .fill(colors.control),
+                        )
+                        .clicked()
+                        && let Some(path) = rfd::FileDialog::new()
+                            .set_title("打开剪辑工程")
+                            .add_filter(format!("{} 工程", PRODUCT_NAME), &["takeproj"])
+                            .pick_file()
+                    {
+                        self.open_project_path(ui.ctx(), path);
+                    }
+                });
+            });
+        let mut right = hero_ui.new_child(egui::UiBuilder::new().max_rect(right_rect));
+        egui::Frame::new()
+                .fill(colors.surface.gamma_multiply(0.86))
+                .corner_radius(16.0)
+                .stroke(egui::Stroke::new(1.0, colors.border))
+                .inner_margin(20.0)
+                .show(&mut right, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("工作区脉冲").size(13.0).strong().color(colors.text));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.colored_label(colors.accent, "●");
+                            });
+                        });
+                        ui.add_space(18.0);
                         ui.label(
-                            RichText::new("开始创作")
-                                .size(25.0)
+                            RichText::new(format!("{:02}", projects.len()))
+                                .size(34.0)
                                 .strong()
                                 .color(colors.text),
                         );
-                        ui.add_space(5.0);
+                        ui.label(RichText::new("最近保存的工程").size(11.0).color(colors.muted));
+                        ui.add_space(18.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("工程目录").size(11.0).color(colors.muted));
+                        ui.add_space(4.0);
                         ui.label(
-                            RichText::new("新建项目，或者继续编辑最近的工程")
-                                .size(13.0)
-                                .color(colors.muted),
+                            RichText::new(self.library.directory().to_string_lossy())
+                                .size(11.0)
+                                .color(colors.text),
                         );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add_sized(
-                                [168.0, 46.0],
-                                egui::Button::new(RichText::new("新建空白工程").size(14.0))
-                                    .fill(colors.accent_fill),
-                            )
-                            .clicked()
-                        {
-                            self.new_project(ui.ctx());
-                        }
-                    });
                 });
-            });
 
         content.add_space(32.0);
         content.horizontal(|ui| {
-            ui.label(RichText::new("最近工程").size(17.0).strong().color(colors.text));
+            ui.label(RichText::new("最近打开").size(17.0).strong().color(colors.text));
             ui.add_space(8.0);
             ui.label(
-                RichText::new(format!("{} 个", projects.len()))
-                    .size(12.0)
+                RichText::new(format!("{} 个工程", projects.len()))
+                    .size(11.0)
                     .color(colors.muted),
             );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    RichText::new(self.library.directory().to_string_lossy())
-                        .size(11.0)
-                        .color(colors.muted),
-                );
-            });
         });
-        content.add_space(12.0);
+        content.add_space(14.0);
 
         if projects.is_empty() {
             egui::Frame::new()
@@ -2021,95 +2117,142 @@ impl Workspace {
                 .inner_margin(24.0)
                 .show(&mut content, |ui| {
                     ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), 170.0),
-                        Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        vec2(ui.available_width(), 120.0),
+                        Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(
-                                RichText::new("这里还没有工程，点击上方开始创作")
-                                    .size(13.0)
-                                    .color(colors.muted),
-                            );
-                        },
-                    );
+                            ui.label(RichText::new("＋").size(24.0).color(colors.accent));
+                            ui.add_space(12.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("还没有最近工程").size(13.0).color(colors.text));
+                                ui.label(
+                                    RichText::new("新建一个空白工程，开始建立你的第一条时间线。")
+                                        .size(11.0)
+                                        .color(colors.muted),
+                                );
+                            });
+                        });
                 });
         } else {
-            egui::ScrollArea::vertical().show(&mut content, |ui| {
-                egui::Grid::new("home-project-grid")
-                    .num_columns(3)
-                    .spacing([14.0, 14.0])
-                    .show(ui, |ui| {
-                        for (index, (path, modified)) in projects.iter().enumerate() {
-                                    let thumbnail = self
-                                        .project_thumbnail_source(path)
-                                        .and_then(|source| self.thumbnails.texture(&source).cloned());
-                                    let mut open_card = false;
-                                    let card = ui.allocate_ui([250.0, 180.0].into(), |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt("home-recent-projects")
+                .show(&mut content, |ui| {
+                    ui.horizontal(|ui| {
+                        for (path, modified) in &projects {
+                            let thumbnail = self
+                                .project_thumbnail_source(path)
+                                .and_then(|source| self.thumbnails.texture(&source).cloned());
+                            let mut open_card = false;
+                            let card = ui.allocate_ui([238.0, 164.0].into(), |ui| {
                                 egui::Frame::new()
                                     .fill(colors.surface)
-                                    .corner_radius(12.0)
+                                    .corner_radius(14.0)
                                     .stroke(egui::Stroke::new(1.0, colors.border))
-                                    .inner_margin(14.0)
+                                    .inner_margin(12.0)
                                     .show(ui, |ui| {
-                                                if let Some(thumbnail) = &thumbnail {
-                                                    ui.add(
-                                                        egui::Image::new(thumbnail)
-                                                            .fit_to_exact_size(vec2(222.0, 96.0))
-                                                            .corner_radius(8.0),
-                                                    );
-                                                } else {
-                                                    let placeholder = ui.allocate_exact_size(
-                                                        vec2(222.0, 96.0),
-                                                        egui::Sense::hover(),
-                                                    );
-                                                    ui.painter().rect_filled(
-                                                        placeholder.0,
-                                                        8.0,
-                                                        colors.control,
-                                                    );
-                                                    ui.painter().text(
-                                                        placeholder.0.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "暂无预览",
-                                                        egui::FontId::proportional(11.0),
-                                                        colors.muted,
-                                                    );
-                                                }
-                                                ui.add_space(8.0);
-                                        ui.label(
-                                            RichText::new(filename(path))
-                                                .size(14.0)
-                                                .strong()
-                                                .color(colors.text),
-                                        );
-                                        ui.add_space(4.0);
+                                        if let Some(thumbnail) = &thumbnail {
+                                            ui.add(
+                                                egui::Image::new(thumbnail)
+                                                    .fit_to_exact_size(vec2(212.0, 92.0))
+                                                    .corner_radius(9.0),
+                                            );
+                                        } else {
+                                            let placeholder = ui.allocate_exact_size(
+                                                vec2(212.0, 92.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                placeholder.0,
+                                                9.0,
+                                                colors.control,
+                                            );
+                                            ui.painter().text(
+                                                placeholder.0.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "暂无预览",
+                                                egui::FontId::proportional(11.0),
+                                                colors.muted,
+                                            );
+                                        }
+                                        ui.add_space(8.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(filename(path))
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(colors.text),
+                                            );
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                ui.label(
+                                                    RichText::new("→").size(15.0).color(colors.accent),
+                                                );
+                                            });
+                                        });
+                                        ui.add_space(3.0);
                                         ui.label(
                                             RichText::new(format_modified(*modified))
                                                 .size(11.0)
                                                 .color(colors.muted),
                                         );
-                                        ui.add_space(8.0);
-                                                    if ui
-                                            .button(RichText::new("打开工程").size(11.0))
-                                            .clicked()
-                                        {
-                                                        open_card = true;
-                                        }
                                     });
-                                    });
-                                    if card.response.clicked() {
-                                        open_card = true;
-                                    }
-                                    if open_card {
-                                        self.open_project_path(ui.ctx(), path.clone());
-                                    }
-                            if (index + 1) % 3 == 0 {
-                                ui.end_row();
+                            });
+                            if card.response.clicked() {
+                                open_card = true;
                             }
+                            if open_card {
+                                self.open_project_path(ui.ctx(), path.clone());
+                            }
+                            ui.add_space(10.0);
                         }
                     });
-            });
+                });
         }
     }
+    fn gradient_action_button(ui: &mut egui::Ui, label: &str, hint: &str) -> bool {
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), 54.0),
+            egui::Sense::click(),
+        );
+        let left = egui::Color32::from_rgb(47, 107, 223);
+        let right = egui::Color32::from_rgb(117, 69, 205);
+        let mut mesh = egui::Mesh::default();
+        let first = mesh.vertices.len() as u32;
+        mesh.colored_vertex(rect.left_top(), left);
+        mesh.colored_vertex(rect.right_top(), right);
+        mesh.colored_vertex(rect.right_bottom(), right.gamma_multiply(0.82));
+        mesh.colored_vertex(rect.left_bottom(), left.gamma_multiply(0.82));
+        mesh.add_triangle(first, first + 1, first + 2);
+        mesh.add_triangle(first, first + 2, first + 3);
+        ui.painter().add(egui::Shape::mesh(mesh));
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            egui::Stroke::new(1.0, egui::Color32::from_white_alpha(48)),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 16.0, rect.top() + 10.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 16.0, rect.bottom() - 10.0),
+            egui::Align2::LEFT_BOTTOM,
+            hint,
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_white_alpha(190),
+        );
+        ui.painter().text(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "→",
+            egui::FontId::proportional(19.0),
+            egui::Color32::WHITE,
+        );
+        response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+    }
+
     fn home_projects(&self) -> Vec<(PathBuf, SystemTime)> {
         let mut projects = fs::read_dir(self.library.directory())
             .ok()
@@ -2285,6 +2428,7 @@ impl eframe::App for Workspace {
         self.focused = focused;
         self.library.poll();
         self.proxy_cache.poll();
+        self.prepare_current_proxy();
         self.prepare_project_proxies();
         self.prepare_current_audio_cache();
         self.poll_speech(ctx);
@@ -2333,4 +2477,5 @@ impl eframe::App for Workspace {
         self.sync_preview(&ctx);
     }
 }
+
 

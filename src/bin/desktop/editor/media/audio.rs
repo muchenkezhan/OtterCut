@@ -169,6 +169,7 @@ enum ScrubCommand {
         sources: Vec<MediaSlice>,
         duration_us: u64,
         timeline_start: u64,
+        position: u64,
         sample_rate: u32,
         channels: u16,
     },
@@ -279,12 +280,14 @@ impl ScrubAudio {
         sources: Vec<MediaSlice>,
         duration_us: u64,
         timeline_start: u64,
+        position: u64,
     ) {
         let _ = self.requests.send(ScrubCommand::Prepare {
             executable: executable.to_owned(),
             sources,
             duration_us,
             timeline_start,
+            position,
             sample_rate: 48_000,
             channels: 2,
         });
@@ -330,6 +333,7 @@ fn scrub_worker(receiver: Receiver<ScrubCommand>, state: Arc<Mutex<ScrubState>>)
                 sources,
                 duration_us,
                 timeline_start,
+                position,
                 sample_rate,
                 channels,
             } => {
@@ -341,6 +345,7 @@ fn scrub_worker(receiver: Receiver<ScrubCommand>, state: Arc<Mutex<ScrubState>>)
                     &sources,
                     duration_us,
                     timeline_start,
+                    position,
                     sample_rate,
                     channels,
                 );
@@ -415,11 +420,6 @@ fn decode_scrub_audio_buffer(
                 let _ = child.wait();
                 return Some(command);
             }
-            if !emit && matches!(command, ScrubCommand::Play { .. }) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Some(command);
-            }
             pending = Some(command);
         }
         let mut read = 0;
@@ -459,12 +459,16 @@ fn prepare_scrub_audio_request(
     sources: &[MediaSlice],
     duration_us: u64,
     timeline_start: u64,
+    position: u64,
     sample_rate: u32,
     channels: u16,
 ) -> Option<ScrubCommand> {
     let key = scrub_cache_key(sources, duration_us, sample_rate, channels);
     if cache.as_ref().is_some_and(|cached| {
-        cached.key == key && cached.duration_us >= duration_us
+        cached.key == key
+            && cached.duration_us >= duration_us
+            && position >= cached.timeline_start
+            && position < cached.timeline_start.saturating_add(cached.duration_us)
     }) {
         return take_latest_scrub_command(receiver, None);
     }
@@ -811,3 +815,4 @@ mod tests {
         assert!((ratio - 1.0).abs() < 0.02, "unchanged tone ratio {ratio}");
     }
 }
+

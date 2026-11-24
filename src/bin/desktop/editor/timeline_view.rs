@@ -83,6 +83,7 @@ pub struct TimelineView {
     marker_action: Option<MarkerAction>,
     transition_drop: Option<TransitionDrop>,
     recognize_audio_track: Option<TrackId>,
+    playhead_seek: PlayheadSeek,
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +102,14 @@ pub(super) struct TimelineInput {
     pub marker_action: Option<MarkerAction>,
     pub transition_drop: Option<TransitionDrop>,
     pub recognize_audio_track: Option<TrackId>,
+    pub playhead_seek: bool,
+    pub playhead_seek_finished: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PlayheadSeek {
+    active: bool,
+    finished: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +209,7 @@ impl TimelineView {
         self.marker_action = None;
         self.transition_drop = None;
         self.recognize_audio_track = None;
+        self.playhead_seek = PlayheadSeek::default();
         normalize_selection(timeline, playhead, selected);
         self.marquee.prune(timeline, *selected);
         if let Some(track) = selected.and_then(|id| timeline.track_for_clip(id)) {
@@ -273,6 +283,8 @@ impl TimelineView {
             marker_action: self.marker_action,
             transition_drop: self.transition_drop,
             recognize_audio_track: self.recognize_audio_track,
+            playhead_seek: self.playhead_seek.active || self.playhead_seek.finished,
+            playhead_seek_finished: self.playhead_seek.finished,
         }
     }
 
@@ -568,9 +580,11 @@ fn transition_exit_at<'a>(
         );
         let colors = ui_theme::palette(ui.ctx());
         let painter = ui.painter_at(rect);
-        if !dragging && !selecting {
-            self.seek_on_canvas(ui, view, timeline.duration(), playhead);
-        }
+        self.playhead_seek = if !dragging && !selecting {
+            self.seek_on_canvas(ui, view, timeline.duration(), playhead)
+        } else {
+            PlayheadSeek::default()
+        };
         let background = if ui.ctx().theme() == egui::Theme::Light {
             colors.surface
         } else {
@@ -785,14 +799,23 @@ fn transition_exit_at<'a>(
         }
     }
 
-    fn seek_on_canvas(&self, ui: &Ui, view: Viewport, duration: u64, playhead: &mut u64) {
+    fn seek_on_canvas(
+        &self,
+        ui: &Ui,
+        view: Viewport,
+        duration: u64,
+        playhead: &mut u64,
+    ) -> PlayheadSeek {
         let response = ui.interact(view.rect, ui.id().with("seek"), Sense::click_and_drag());
+        let active = response.is_pointer_button_down_on() || response.dragged();
+        let finished = response.clicked() || response.drag_stopped();
         if self.drag.is_none()
             && (response.clicked() || response.dragged_by(egui::PointerButton::Primary))
             && let Some(pointer) = response.interact_pointer_pos()
         {
             *playhead = view.time_at(pointer.x).min(duration);
         }
+        PlayheadSeek { active, finished }
     }
 
     fn draw_clip(
@@ -1617,3 +1640,4 @@ impl Gesture {
         }
     }
 }
+
