@@ -49,6 +49,7 @@ pub(crate) enum Icon {
     Fit,
     AddMedia,
     Media,
+    Editor,
     Audio,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Microphone,
@@ -62,9 +63,7 @@ pub(crate) enum Icon {
     Display,
     #[cfg(target_os = "macos")]
     Window,
-    #[cfg(target_os = "macos")]
     ClickFollow,
-    #[cfg(target_os = "macos")]
     Settings,
     Captions,
     Text,
@@ -309,6 +308,18 @@ impl Icon {
                 rect((-7.6, -6.2), (7.6, 6.2), 2_u8);
                 path(&[(-2.0, -3.3), (3.3, 0.0), (-2.0, 3.3), (-2.0, -3.3)]);
             }
+            Self::Editor => {
+                painter.circle_stroke(point(-6.3, -3.8), 1.8 * scale, stroke);
+                painter.circle_stroke(point(-6.3, 3.8), 1.8 * scale, stroke);
+                line((-4.7, -2.8), (-0.5, 0.0));
+                line((-4.7, 2.8), (-0.5, 0.0));
+                line((-0.5, 0.0), (3.0, -5.5));
+                line((-0.5, 0.0), (3.0, 5.5));
+                for y in [-5.5, 0.0, 5.5] {
+                    line((4.2, y), (8.5, y));
+                    line((5.8, y - 1.1), (5.8, y + 1.1));
+                }
+            }
             Self::Audio => {
                 path(&[(7.0, 3.0), (7.0, -7.0), (-2.0, -4.8), (-2.0, 5.6)]);
                 line((-2.0, -1.7), (7.0, -3.8));
@@ -387,34 +398,17 @@ impl Icon {
                     painter.circle_filled(point(x, -4.2), 0.7 * scale, color);
                 }
             }
-            #[cfg(target_os = "macos")]
             Self::ClickFollow => {
-                path(&[
-                    (-6.0, -7.0),
-                    (5.8, 0.4),
-                    (0.3, 1.7),
-                    (3.5, 7.0),
-                    (0.4, 8.5),
-                    (-2.8, 2.9),
-                    (-6.0, 5.4),
-                    (-6.0, -7.0),
-                ]);
-                painter.circle_stroke(point(4.0, -5.0), 2.0 * scale, stroke);
+                Self::Cursor.paint_scaled(painter, point(2.0, 2.0), color, 0.85 * scale);
+                line((-8.5, -3.2), (-6.1, -3.2));
+                line((-7.2, -7.6), (-5.5, -5.9));
+                line((-2.3, -10.0), (-2.3, -7.9));
             }
-            #[cfg(target_os = "macos")]
             Self::Settings => {
-                painter.circle_stroke(center, 5.4 * scale, stroke);
-                painter.circle_stroke(center, 1.9 * scale, stroke);
-                for step in 0..8 {
-                    let angle = step as f32 * FRAC_PI_4;
-                    let direction = vec2(angle.cos(), angle.sin());
-                    painter.line_segment(
-                        [
-                            center + direction * (7.0 * scale),
-                            center + direction * (9.0 * scale),
-                        ],
-                        stroke,
-                    );
+                for (y, knob) in [(-4.0, 2.0), (0.0, -2.0), (4.0, 1.0)] {
+                    line((-6.5, y), (knob - 2.1, y));
+                    line((knob + 2.1, y), (6.5, y));
+                    painter.circle_stroke(point(knob, y), 1.8 * scale, stroke);
                 }
             }
             Self::Stop => {
@@ -446,7 +440,12 @@ pub(crate) fn icon_button(
     style: ButtonStyle,
 ) -> Response {
     ui.add_enabled(enabled, |ui: &mut Ui| {
-        let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+        let size = if matches!(icon, Icon::Editor) {
+            vec2(36.0, 34.0)
+        } else {
+            vec2(32.0, 32.0)
+        };
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         describe_button(&response, label, style);
         if ui.is_rect_visible(rect) {
             paint_button(ui, icon, rect, &response, style);
@@ -484,7 +483,11 @@ fn paint_button(ui: &Ui, icon: Icon, rect: Rect, response: &Response, style: But
     if response.enabled() && response.has_focus() {
         paint_icon_focus(painter, rect.center() + vec2(0.0, 12.0), colors.accent);
     }
-    icon.paint(painter, rect.center(), tint);
+    match icon {
+        Icon::Editor => icon.paint_scaled(painter, rect.center(), tint, 1.12),
+        Icon::Settings => icon.paint_scaled(painter, rect.center(), tint, 1.08),
+        _ => icon.paint(painter, rect.center(), tint),
+    }
 }
 
 pub(crate) fn paint_icon_focus(painter: &Painter, center: Pos2, color: Color32) {

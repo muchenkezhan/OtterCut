@@ -38,6 +38,7 @@ OtterCut 把录制和后期制作放在同一个工程里。录完屏后直接�
   <a href="#功能">功能</a> ·
   <a href="#平台支持">平台支持</a> ·
   <a href="#操作参考">操作参考</a> ·
+  <a href="CHANGELOG.md">更新记录</a> ·
   <a href="PROJECT_PLAN.md">项目路线图</a>
 </p>
 
@@ -160,7 +161,7 @@ cargo run --locked
 
 ### 语言与本地化
 
-界面首发 **简体中文（zh-CN）** 和 **English（en-US）**。编辑台顶栏和录制来源面板都可以切换语言，选择会保存到当前用户的 OtterCut 配置目录，工程文件不会写入语言设置。首次启动会读取已保存的语言，其次读取 `OTTERCUT_LANGUAGE`、`LC_ALL`、`LANGUAGE` 或 `LANG`，无法识别时使用简体中文。
+界面首发 **简体中文（zh-CN）** 和 **English（en-US）**。编辑台顶栏和录制工具条的设备设置面板都可以切换语言与明暗主题，选择会保存到当前用户的 OtterCut 配置目录，工程文件不会写入语言设置。首次启动会读取已保存的语言，其次读取 `OTTERCUT_LANGUAGE`、`LC_ALL`、`LANGUAGE` 或 `LANG`，无法识别时使用简体中文。
 
 所有新增界面文案都应使用 `src/i18n.rs` 中的稳定资源键。带参数的消息使用命名占位符，例如 `{count}`，不要在界面调用点拼接半句。新增语言时同步扩展 `Language`、资源键和双语覆盖测试。
 

@@ -1987,21 +1987,6 @@ impl Workspace {
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new("本地工程").size(11.0).color(colors.muted));
-                ui.add_space(14.0);
-                if ui
-                    .add_sized(
-                        [118.0, 32.0],
-                        egui::Button::new(RichText::new("打开工程").size(12.0))
-                            .fill(colors.control),
-                    )
-                    .clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .set_title("打开剪辑工程")
-                        .add_filter(format!("{} 工程", PRODUCT_NAME), &["takeproj"])
-                        .pick_file()
-                {
-                    self.open_project_path(ui.ctx(), path);
-                }
             });
         });
 
@@ -2043,22 +2028,24 @@ impl Workspace {
                         .color(colors.muted),
                 );
                 ui.add_space(14.0);
-                if Self::gradient_action_button(ui, "创建项目", "从空白时间线开始") {
-                    self.new_project(ui.ctx());
-                }
-                ui.add_space(8.0);
+                let button_gap = ui.spacing().item_spacing.x;
+                let button_width = ((ui.available_width() - button_gap) * 0.5).max(0.0);
+                let button_size = vec2(button_width, 54.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_sized(
-                            [124.0, 36.0],
-                            egui::Button::new(RichText::new("打开工程").size(13.0))
-                                .fill(colors.control),
-                        )
-                        .clicked()
-                        && let Some(path) = rfd::FileDialog::new()
-                            .set_title("打开剪辑工程")
-                            .add_filter(format!("{} 工程", PRODUCT_NAME), &["takeproj"])
-                            .pick_file()
+                    if Self::gradient_action_button(ui, button_size, "创建项目", "从空白时间线开始") {
+                        self.new_project(ui.ctx());
+                    }
+                    if Self::plain_action_button(
+                        ui,
+                        button_size,
+                        "打开项目",
+                        "选择已有工程",
+                        colors.control,
+                        colors.border,
+                    ) && let Some(path) = rfd::FileDialog::new()
+                        .set_title("打开剪辑工程")
+                        .add_filter(format!("{} 工程", PRODUCT_NAME), &["takeproj"])
+                        .pick_file()
                     {
                         self.open_project_path(ui.ctx(), path);
                     }
@@ -2207,11 +2194,13 @@ impl Workspace {
                 });
         }
     }
-    fn gradient_action_button(ui: &mut egui::Ui, label: &str, hint: &str) -> bool {
-        let (rect, response) = ui.allocate_exact_size(
-            vec2(ui.available_width(), 54.0),
-            egui::Sense::click(),
-        );
+    fn gradient_action_button(
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        label: &str,
+        hint: &str,
+    ) -> bool {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let left = egui::Color32::from_rgb(47, 107, 223);
         let right = egui::Color32::from_rgb(117, 69, 205);
         let mut mesh = egui::Mesh::default();
@@ -2250,7 +2239,51 @@ impl Workspace {
             egui::FontId::proportional(19.0),
             egui::Color32::WHITE,
         );
-        response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    }
+
+    fn plain_action_button(
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        label: &str,
+        hint: &str,
+        fill: egui::Color32,
+        border: egui::Color32,
+    ) -> bool {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        ui.painter().rect_filled(rect, 12.0, fill);
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            egui::Stroke::new(1.0, border),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 16.0, rect.top() + 10.0),
+            egui::Align2::LEFT_TOP,
+            label,
+            egui::FontId::proportional(14.0),
+            ui.visuals().text_color(),
+        );
+        ui.painter().text(
+            egui::pos2(rect.left() + 16.0, rect.bottom() - 10.0),
+            egui::Align2::LEFT_BOTTOM,
+            hint,
+            egui::FontId::proportional(10.0),
+            ui.visuals().weak_text_color(),
+        );
+        ui.painter().text(
+            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "→",
+            egui::FontId::proportional(19.0),
+            ui.visuals().text_color(),
+        );
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
     }
 
     fn home_projects(&self) -> Vec<(PathBuf, SystemTime)> {

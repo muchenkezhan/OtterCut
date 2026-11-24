@@ -646,7 +646,7 @@ impl Recorder {
         };
         if ui_icons::icon_button(
             ui,
-            Icon::Media,
+            Icon::Editor,
             editor_label,
             self.editor.is_none(),
             if self.editor.is_some() {
@@ -911,36 +911,6 @@ impl Recorder {
                 if ui.button("关闭").clicked() {
                     self.panel = None;
                 }
-                ui.menu_button("语言", |ui| {
-                    let locale = Locale::from_context(ui.ctx());
-                    for language in [Language::ZhCn, Language::EnUs] {
-                        let label = match language {
-                            Language::ZhCn => "简体中文",
-                            Language::EnUs => "English",
-                        };
-                        if ui
-                            .selectable_label(locale.language() == language, label)
-                            .clicked()
-                        {
-                            if let Err(error) = Locale::set_context_and_persist(ui.ctx(), language)
-                            {
-                                self.notice(format!("无法保存语言设置（{error}）"), true);
-                            }
-                            ui.close();
-                        }
-                    }
-                });
-                let theme_icon = if ui.ctx().theme() == egui::Theme::Dark {
-                    Icon::Sun
-                } else {
-                    Icon::Moon
-                };
-                if ui_icons::icon_button(ui, theme_icon, "切换主题", true, ButtonStyle::Quiet)
-                    .clicked()
-                    && let Err(error) = ui_theme::toggle(ui.ctx())
-                {
-                    self.notice(format!("无法保存主题（{error}）"), true);
-                }
             });
         });
         let mut source_window = self.source_window;
@@ -1016,6 +986,7 @@ impl Recorder {
     fn show_devices_panel(&mut self, ui: &mut egui::Ui) {
         let colors = ui_theme::palette(ui.ctx());
         let locale = Locale::from_context(ui.ctx());
+        ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(locale.text(key::DEVICE_TITLE)).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1033,226 +1004,245 @@ impl Recorder {
                 {
                     self.notice(format!("{error:#}"), true);
                 }
+                let (theme_icon, theme_hint) = if ui.ctx().theme() == egui::Theme::Dark {
+                    (Icon::Sun, locale.text(key::SWITCH_LIGHT))
+                } else {
+                    (Icon::Moon, locale.text(key::SWITCH_DARK))
+                };
+                if ui_icons::icon_button(ui, theme_icon, theme_hint, true, ButtonStyle::Quiet)
+                    .clicked()
+                    && let Err(error) = ui_theme::toggle(ui.ctx())
+                {
+                    self.notice(format!("{}: {error}", theme_hint), true);
+                }
+                ui.menu_button(locale.text(key::LANGUAGE), |ui| {
+                    let locale = Locale::from_context(ui.ctx());
+                    for language in [Language::ZhCn, Language::EnUs] {
+                        let label = match language {
+                            Language::ZhCn => locale.text(key::LANGUAGE_ZH),
+                            Language::EnUs => locale.text(key::LANGUAGE_EN),
+                        };
+                        if ui
+                            .selectable_label(locale.language() == language, label)
+                            .clicked()
+                        {
+                            if let Err(error) = Locale::set_context_and_persist(ui.ctx(), language)
+                            {
+                                self.notice(
+                                    format!("{}: {error}", locale.text(key::LANGUAGE)),
+                                    true,
+                                );
+                            }
+                            ui.close();
+                        }
+                    }
+                });
             });
         });
         if self.device_scan.is_some() {
             ui.label(RichText::new(locale.text(key::DEVICE_READING)).color(colors.muted));
         }
-        ui.add_enabled_ui(self.job.is_none(), |ui| {
-            ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut self.microphone,
-                    locale.text(key::DEVICE_RECORD_MICROPHONE),
-                );
-                let selected = self
-                    .microphones
-                    .iter()
-                    .find(|device| Some(&device.id) == self.microphone_device.as_ref())
-                    .map_or(locale.text(key::DEVICE_SYSTEM_DEFAULT), |device| {
-                        device.name.as_str()
-                    });
-                egui::ComboBox::from_id_salt("macos-microphone-device")
-                    .width(205.0)
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.microphone_device,
-                            None,
-                            locale.text(key::DEVICE_SYSTEM_DEFAULT),
+        egui::ScrollArea::vertical()
+            .id_salt("macos-device-settings")
+            .max_height(190.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.add_enabled_ui(self.job.is_none(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(
+                            &mut self.microphone,
+                            locale.text(key::DEVICE_RECORD_MICROPHONE),
                         );
-                        for device in &self.microphones {
-                            ui.selectable_value(
-                                &mut self.microphone_device,
-                                Some(device.id.clone()),
-                                &device.name,
-                            );
-                        }
+                        let selected = self
+                            .microphones
+                            .iter()
+                            .find(|device| Some(&device.id) == self.microphone_device.as_ref())
+                            .map_or(locale.text(key::DEVICE_SYSTEM_DEFAULT), |device| {
+                                device.name.as_str()
+                            });
+                        egui::ComboBox::from_id_salt("macos-microphone-device")
+                            .width(130.0)
+                            .truncate()
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.microphone_device,
+                                    None,
+                                    locale.text(key::DEVICE_SYSTEM_DEFAULT),
+                                );
+                                for device in &self.microphones {
+                                    ui.selectable_value(
+                                        &mut self.microphone_device,
+                                        Some(device.id.clone()),
+                                        &device.name,
+                                    );
+                                }
+                            });
                     });
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .button(if self.meter.is_some() {
-                        locale.text(key::DEVICE_TEST_STOP)
-                    } else {
-                        locale.text(key::DEVICE_TEST_MICROPHONE)
-                    })
-                    .clicked()
-                {
-                    if self.meter.take().is_none() {
-                        let input_id = self.microphone_device.as_ref().and_then(|id| {
-                            self.microphones
-                                .iter()
-                                .find(|device| &device.id == id)
-                                .and_then(|device| device.meter_id.clone())
-                        });
-                        match InputMeter::open(input_id.as_deref()) {
-                            Ok(meter) => {
-                                self.meter = Some(meter);
-                                self.meter_error = None;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button(if self.meter.is_some() {
+                                locale.text(key::DEVICE_TEST_STOP)
+                            } else {
+                                locale.text(key::DEVICE_TEST_MICROPHONE)
+                            })
+                            .clicked()
+                        {
+                            if self.meter.take().is_none() {
+                                let input_id = self.microphone_device.as_ref().and_then(|id| {
+                                    self.microphones
+                                        .iter()
+                                        .find(|device| &device.id == id)
+                                        .and_then(|device| device.meter_id.clone())
+                                });
+                                match InputMeter::open(input_id.as_deref()) {
+                                    Ok(meter) => {
+                                        self.meter = Some(meter);
+                                        self.meter_error = None;
+                                    }
+                                    Err(error) => self.meter_error = Some(format!("{error:#}")),
+                                }
                             }
-                            Err(error) => self.meter_error = Some(format!("{error:#}")),
                         }
-                    }
-                }
-                if let Some(meter) = &mut self.meter {
-                    match meter.level() {
-                        Ok(level) => {
-                            self.meter_level = level.max(self.meter_level * 0.65);
-                            ui.ctx().request_repaint_after(Duration::from_millis(40));
-                            ui.add(
-                                egui::ProgressBar::new(self.meter_level)
-                                    .desired_width(148.0)
-                                    .text(format!("{:.0}%", self.meter_level * 100.0)),
-                            );
-                        }
-                        Err(error) => {
-                            self.meter_error = Some(format!("{error:#}"));
-                            self.meter = None;
-                        }
-                    }
-                }
-            });
-            if let Some(error) = &self.meter_error {
-                ui.colored_label(colors.danger, error);
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let mut record_camera = self.record_camera;
-                if ui
-                    .add_enabled(
-                        self.record_camera || self.camera_mode.is_some(),
-                        egui::Checkbox::new(
-                            &mut record_camera,
-                            locale.text(key::DEVICE_RECORD_CAMERA),
-                        ),
-                    )
-                    .changed()
-                {
-                    self.set_record_camera(record_camera);
-                }
-                let mut choice = self.camera_device.clone();
-                let selected = self
-                    .cameras
-                    .iter()
-                    .find(|device| Some(&device.id) == choice.as_ref())
-                    .map_or(locale.text(key::DEVICE_NO_CAMERA), |device| {
-                        device.name.as_str()
-                    });
-                egui::ComboBox::from_id_salt("macos-camera-device")
-                    .width(205.0)
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for device in &self.cameras {
-                            ui.selectable_value(&mut choice, Some(device.id.clone()), &device.name);
+                        if let Some(meter) = &mut self.meter {
+                            match meter.level() {
+                                Ok(level) => {
+                                    self.meter_level = level.max(self.meter_level * 0.65);
+                                    ui.ctx().request_repaint_after(Duration::from_millis(40));
+                                    ui.add(
+                                        egui::ProgressBar::new(self.meter_level)
+                                            .desired_width(148.0)
+                                            .text(format!("{:.0}%", self.meter_level * 100.0)),
+                                    );
+                                }
+                                Err(error) => {
+                                    self.meter_error = Some(format!("{error:#}"));
+                                    self.meter = None;
+                                }
+                            }
                         }
                     });
-                if choice != self.camera_device {
-                    let previewing = self.camera_preview.is_some();
-                    self.stop_camera_preview();
-                    self.camera_device = choice;
-                    self.camera_mode = self
-                        .camera_device
-                        .as_deref()
-                        .and_then(|id| self.cameras.iter().find(|device| device.id == id))
-                        .and_then(|device| preferred_camera_mode(&device.modes));
-                    if self.camera_mode.is_none() {
-                        self.record_camera = false;
+                    if let Some(error) = &self.meter_error {
+                        ui.colored_label(colors.danger, error);
                     }
-                    if previewing {
-                        self.set_camera_preview(true);
-                    }
-                }
-            });
-            if let Some(camera) = self.camera_device.as_deref()
-                && let Some(device) = self.cameras.iter().find(|device| device.id == camera)
-            {
-                let mut mode = self.camera_mode.clone();
-                ui.label(locale.text(key::DEVICE_QUALITY));
-                let selected = mode.as_ref().map_or_else(
-                    || locale.text(key::DEVICE_NO_QUALITY).to_owned(),
-                    camera_mode_label,
-                );
-                egui::ComboBox::from_id_salt("macos-camera-mode")
-                    .width(200.0)
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for option in &device.modes {
-                            ui.selectable_value(
-                                &mut mode,
-                                Some(option.clone()),
-                                camera_mode_label(option),
-                            );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let mut record_camera = self.record_camera;
+                        if ui
+                            .add_enabled(
+                                self.record_camera || self.camera_mode.is_some(),
+                                egui::Checkbox::new(
+                                    &mut record_camera,
+                                    locale.text(key::DEVICE_RECORD_CAMERA),
+                                ),
+                            )
+                            .changed()
+                        {
+                            self.set_record_camera(record_camera);
+                        }
+                        let mut choice = self.camera_device.clone();
+                        let selected = self
+                            .cameras
+                            .iter()
+                            .find(|device| Some(&device.id) == choice.as_ref())
+                            .map_or(locale.text(key::DEVICE_NO_CAMERA), |device| {
+                                device.name.as_str()
+                            });
+                        egui::ComboBox::from_id_salt("macos-camera-device")
+                            .width(170.0)
+                            .truncate()
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for device in &self.cameras {
+                                    ui.selectable_value(
+                                        &mut choice,
+                                        Some(device.id.clone()),
+                                        &device.name,
+                                    );
+                                }
+                            });
+                        if choice != self.camera_device {
+                            let previewing = self.camera_preview.is_some();
+                            self.stop_camera_preview();
+                            self.camera_device = choice;
+                            self.camera_mode = self
+                                .camera_device
+                                .as_deref()
+                                .and_then(|id| self.cameras.iter().find(|device| device.id == id))
+                                .and_then(|device| preferred_camera_mode(&device.modes));
+                            if self.camera_mode.is_none() {
+                                self.record_camera = false;
+                            }
+                            if previewing {
+                                self.set_camera_preview(true);
+                            }
                         }
                     });
-                self.camera_mode = mode;
-            }
-            ui.horizontal(|ui| {
-                let previewing = self.camera_preview.is_some();
-                if ui
-                    .add_enabled(
-                        previewing || self.camera_device.is_some(),
-                        egui::Button::new(if previewing {
-                            locale.text(key::DEVICE_CLOSE_CAMERA)
-                        } else {
-                            locale.text(key::DEVICE_OPEN_CAMERA)
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.set_camera_preview(!previewing);
-                }
-                ui.label(locale.text(key::CAMERA_PREVIEW_SHAPE));
-                let mut shape = self.camera_preview_shape;
-                let shape_label = |shape| {
-                    locale.text(match shape {
-                        CameraPreviewShape::Circle => key::CAMERA_PREVIEW_CIRCLE,
-                        CameraPreviewShape::Square => key::CAMERA_PREVIEW_SQUARE,
-                    })
-                };
-                egui::ComboBox::from_id_salt("macos-camera-preview-shape")
-                    .width(80.0)
-                    .selected_text(shape_label(shape))
-                    .show_ui(ui, |ui| {
-                        for option in [CameraPreviewShape::Circle, CameraPreviewShape::Square] {
-                            ui.selectable_value(&mut shape, option, shape_label(option));
-                        }
-                    });
-                if shape != self.camera_preview_shape {
-                    self.set_camera_preview_shape(shape);
-                }
-            });
-        });
-        ui.separator();
-        ui.horizontal(|ui| {
-            let (theme_icon, theme_hint) = if ui.ctx().theme() == egui::Theme::Dark {
-                (Icon::Sun, "切换到浅色模式")
-            } else {
-                (Icon::Moon, "切换到深色模式")
-            };
-            if ui_icons::icon_button(ui, theme_icon, theme_hint, true, ButtonStyle::Quiet).clicked()
-                && let Err(error) = ui_theme::toggle(ui.ctx())
-            {
-                self.notice(format!("无法保存主题（{error}）"), true);
-            }
-            ui.menu_button(locale.text(key::LANGUAGE), |ui| {
-                let locale = Locale::from_context(ui.ctx());
-                for language in [Language::ZhCn, Language::EnUs] {
-                    let label = match language {
-                        Language::ZhCn => locale.text(key::LANGUAGE_ZH),
-                        Language::EnUs => locale.text(key::LANGUAGE_EN),
-                    };
-                    if ui
-                        .selectable_label(locale.language() == language, label)
-                        .clicked()
+                    if let Some(camera) = self.camera_device.as_deref()
+                        && let Some(device) = self.cameras.iter().find(|device| device.id == camera)
                     {
-                        if let Err(error) = Locale::set_context_and_persist(ui.ctx(), language) {
-                            self.notice(format!("{}: {error}", locale.text(key::LANGUAGE)), true);
-                        }
-                        ui.close();
+                        let mut mode = self.camera_mode.clone();
+                        let selected = mode.as_ref().map_or_else(
+                            || locale.text(key::DEVICE_NO_QUALITY).to_owned(),
+                            camera_mode_label,
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label(locale.text(key::DEVICE_QUALITY));
+                            egui::ComboBox::from_id_salt("macos-camera-mode")
+                                .width(175.0)
+                                .truncate()
+                                .selected_text(selected)
+                                .show_ui(ui, |ui| {
+                                    for option in &device.modes {
+                                        ui.selectable_value(
+                                            &mut mode,
+                                            Some(option.clone()),
+                                            camera_mode_label(option),
+                                        );
+                                    }
+                                });
+                        });
+                        self.camera_mode = mode;
                     }
-                }
+                    ui.horizontal(|ui| {
+                        let previewing = self.camera_preview.is_some();
+                        if ui
+                            .add_enabled(
+                                previewing || self.camera_device.is_some(),
+                                egui::Button::new(if previewing {
+                                    locale.text(key::DEVICE_CLOSE_CAMERA)
+                                } else {
+                                    locale.text(key::DEVICE_OPEN_CAMERA)
+                                }),
+                            )
+                            .clicked()
+                        {
+                            self.set_camera_preview(!previewing);
+                        }
+                        ui.label(locale.text(key::CAMERA_PREVIEW_SHAPE));
+                        let mut shape = self.camera_preview_shape;
+                        let shape_label = |shape| {
+                            locale.text(match shape {
+                                CameraPreviewShape::Circle => key::CAMERA_PREVIEW_CIRCLE,
+                                CameraPreviewShape::Square => key::CAMERA_PREVIEW_SQUARE,
+                            })
+                        };
+                        egui::ComboBox::from_id_salt("macos-camera-preview-shape")
+                            .width(80.0)
+                            .selected_text(shape_label(shape))
+                            .show_ui(ui, |ui| {
+                                for option in
+                                    [CameraPreviewShape::Circle, CameraPreviewShape::Square]
+                                {
+                                    ui.selectable_value(&mut shape, option, shape_label(option));
+                                }
+                            });
+                        if shape != self.camera_preview_shape {
+                            self.set_camera_preview_shape(shape);
+                        }
+                    });
+                });
             });
-        });
     }
 
     fn next_path(&self) -> Result<PathBuf> {
@@ -1372,7 +1362,7 @@ impl Recorder {
         };
         if ui_icons::icon_button(
             ui,
-            Icon::Media,
+            Icon::Editor,
             editor_label,
             self.editor.is_none(),
             editor_style,
@@ -1460,7 +1450,7 @@ impl eframe::App for Recorder {
         #[cfg(target_os = "macos")]
         let panel_height = match self.panel {
             Some(Panel::Sources) => 165.0,
-            Some(Panel::Devices) => 270.0,
+            Some(Panel::Devices) => 250.0,
             None => 0.0,
         };
         #[cfg(target_os = "linux")]

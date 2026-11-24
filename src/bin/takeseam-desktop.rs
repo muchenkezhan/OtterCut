@@ -879,17 +879,11 @@ mod desktop {
         }
 
         fn sources_panel(&mut self, ui: &mut egui::Ui) {
-            let colors = ui_theme::palette(ui.ctx());
             let locale = Locale::from_context(ui.ctx());
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
             ui.spacing_mut().interact_size.y = 28.0;
 
-            let (theme_icon, theme_hint) = if ui.ctx().theme() == egui::Theme::Dark {
-                (SharedIcon::Sun, "切换到浅色模式")
-            } else {
-                (SharedIcon::Moon, "切换到深色模式")
-            };
             let header = ui
                 .horizontal(|ui| {
                     ui.label(
@@ -899,29 +893,6 @@ mod desktop {
                     );
                     let detail = ui.allocate_response(vec2(94.0, 16.0), egui::Sense::hover());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if panel_icon_button(ui, Icon::Shared(theme_icon), theme_hint).clicked()
-                            && let Err(error) = ui_theme::toggle(ui.ctx())
-                        {
-                            self.message = format!("{}（{error}）", locale.text(key::SWITCH_LIGHT));
-                        }
-                        ui.menu_button(locale.text(key::LANGUAGE), |ui| {
-                            for language in [Language::ZhCn, Language::EnUs] {
-                                let selected = locale.language() == language;
-                                let label = match language {
-                                    Language::ZhCn => locale.text(key::LANGUAGE_ZH),
-                                    Language::EnUs => locale.text(key::LANGUAGE_EN),
-                                };
-                                if ui.selectable_label(selected, label).clicked() {
-                                    if let Err(error) =
-                                        Locale::set_context_and_persist(ui.ctx(), language)
-                                    {
-                                        self.message =
-                                            format!("{}: {error}", locale.text(key::LANGUAGE));
-                                    }
-                                    ui.close();
-                                }
-                            }
-                        });
                         ui.add_enabled_ui(self.task.is_none(), |ui| {
                             if panel_icon_button(
                                 ui,
@@ -1152,6 +1123,49 @@ mod desktop {
                 .filter(|right| *right > visible_right)
                 .count()
         }
+
+        fn appearance_settings(&mut self, ui: &mut egui::Ui) {
+            let locale = Locale::from_context(ui.ctx());
+            let (theme_icon, theme_hint) = if ui.ctx().theme() == egui::Theme::Dark {
+                (SharedIcon::Sun, locale.text(key::SWITCH_LIGHT))
+            } else {
+                (SharedIcon::Moon, locale.text(key::SWITCH_DARK))
+            };
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(locale.text(key::SETTINGS))
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.menu_button(locale.text(key::LANGUAGE), |ui| {
+                        let locale = Locale::from_context(ui.ctx());
+                        for language in [Language::ZhCn, Language::EnUs] {
+                            let selected = locale.language() == language;
+                            let label = match language {
+                                Language::ZhCn => locale.text(key::LANGUAGE_ZH),
+                                Language::EnUs => locale.text(key::LANGUAGE_EN),
+                            };
+                            if ui.selectable_label(selected, label).clicked() {
+                                if let Err(error) =
+                                    Locale::set_context_and_persist(ui.ctx(), language)
+                                {
+                                    self.message =
+                                        format!("{}: {error}", locale.text(key::LANGUAGE));
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
+                    if panel_icon_button(ui, Icon::Shared(theme_icon), theme_hint).clicked()
+                        && let Err(error) = ui_theme::toggle(ui.ctx())
+                    {
+                        self.message = format!("{}（{error}）", theme_hint);
+                    }
+                });
+            });
+        }
     }
 
     impl RecorderApp {
@@ -1191,6 +1205,7 @@ mod desktop {
                             PopupPage::Devices => {
                                 self.devices
                                     .show(ui, &mut self.microphone, self.task.is_some());
+                                self.appearance_settings(ui);
                                 if !self.message.is_empty() {
                                     ui.colored_label(colors.danger, shorten(&self.message, 155));
                                 }
@@ -1571,10 +1586,7 @@ mod desktop {
                     }
                 }
                 Self::ClickFollow => {
-                    SharedIcon::Cursor.paint_scaled(painter, point(2.0, 2.0), color, 0.85);
-                    line(-8.5, -3.2, -6.1, -3.2);
-                    line(-7.2, -7.6, -5.5, -5.9);
-                    line(-2.3, -10.0, -2.3, -7.9);
+                    SharedIcon::ClickFollow.paint_scaled(painter, center, color, 1.0);
                 }
                 Self::Record => {
                     painter.circle_filled(center, 6.0, color);
@@ -1585,10 +1597,7 @@ mod desktop {
                     }
                 }
                 Self::Editor => {
-                    painter.circle_stroke(point(-5.0, 4.0), 2.4, stroke);
-                    painter.circle_stroke(point(5.0, 4.0), 2.4, stroke);
-                    line(-3.2, 2.4, 6.5, -6.0);
-                    line(3.2, 2.4, -6.5, -6.0);
+                    SharedIcon::Editor.paint_scaled(painter, center, color, 1.12);
                 }
                 Self::EditorMinimize => {
                     rectangle(-8.0, -6.0, 16.0, 12.0, 2);
@@ -1601,15 +1610,7 @@ mod desktop {
                     line(0.0, -3.0, 3.0, 0.0);
                 }
                 Self::Settings => {
-                    let outline = (0..32)
-                        .map(|index| {
-                            let angle = index as f32 * std::f32::consts::TAU / 32.0;
-                            let radius = if matches!(index % 4, 1 | 2) { 8.1 } else { 6.5 };
-                            point(angle.cos() * radius, angle.sin() * radius)
-                        })
-                        .collect();
-                    painter.add(egui::Shape::closed_line(outline, stroke));
-                    painter.circle_stroke(center, 2.5, stroke);
+                    SharedIcon::Settings.paint_scaled(painter, center, color, 1.08);
                 }
                 Self::Saved => {
                     line(-4.0, 0.0, -1.0, 3.0);
@@ -1641,7 +1642,13 @@ mod desktop {
         label: &str,
         selected: Option<bool>,
     ) -> egui::Response {
-        let width = if icon.is_record_control() { 40.0 } else { 32.0 };
+        let width = if matches!(icon, Icon::Editor) {
+            36.0
+        } else if icon.is_record_control() {
+            40.0
+        } else {
+            32.0
+        };
         let response = draw_icon_button(ui, icon, label, selected, [width, 34.0]);
         queue_icon_hint(ui, &response, label);
         response
