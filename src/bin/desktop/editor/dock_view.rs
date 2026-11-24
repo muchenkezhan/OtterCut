@@ -107,11 +107,14 @@ pub(super) fn show(
     let drag = track_panel_pointer(ui, &measure.panels);
     let mut menu_move = None;
     // A release can add material even when the cards are rebuilt in the same frame.
+    // Source panels must receive the pointer before the timeline consumes the
+    // same frame. This keeps cross-panel drag and drop reliable regardless of
+    // where the panes are positioned visually.
     for pane in [
-        Pane::Timeline,
         Pane::Materials,
-        Pane::Inspector,
         Pane::Preview,
+        Pane::Inspector,
+        Pane::Timeline,
     ] {
         let Some(panel) = measure.panels.iter().find(|panel| panel.pane == pane) else {
             continue;

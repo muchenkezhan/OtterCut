@@ -11,6 +11,7 @@ use super::media::MediaTools;
 
 const MATERIAL_CACHE_LIMIT: usize = 96;
 const TIMELINE_CACHE_LIMIT: usize = 384;
+const PREVIEW_CACHE_LIMIT: usize = 24;
 const QUEUE_LIMIT: usize = 8;
 
 pub(super) struct Thumbnails {
@@ -26,6 +27,7 @@ pub(super) struct Thumbnails {
 enum Mode {
     Material,
     Timeline,
+    Preview,
 }
 
 impl Mode {
@@ -33,6 +35,7 @@ impl Mode {
         match self {
             Self::Material => MATERIAL_CACHE_LIMIT,
             Self::Timeline => TIMELINE_CACHE_LIMIT,
+            Self::Preview => PREVIEW_CACHE_LIMIT,
         }
     }
 
@@ -40,6 +43,7 @@ impl Mode {
         match self {
             Self::Material => "asset-thumbnail",
             Self::Timeline => "timeline-thumbnail",
+            Self::Preview => "preview-thumbnail",
         }
     }
 }
@@ -70,14 +74,22 @@ impl Worker {
         thread::Builder::new()
             .name(format!("{} thumbnails", takeseam::PRODUCT_NAME))
             .spawn(move || {
-                while let Ok(key) = incoming.recv() {
+                while let Ok(mut key) = incoming.recv() {
                     if close.load(Ordering::Acquire) {
                         break;
+                    }
+                    if matches!(mode, Mode::Preview) {
+                        while let Ok(next) = incoming.try_recv() {
+                            key = next;
+                        }
                     }
                     let image = match mode {
                         Mode::Material => tools.thumbnail(&key.path, &close),
                         Mode::Timeline => {
                             tools.timeline_thumbnail(&key.path, key.timestamp_us, &close)
+                        }
+                        Mode::Preview => {
+                            tools.preview_thumbnail(&key.path, key.timestamp_us, &close)
                         }
                     };
                     if outgoing.send((key, image.ok())).is_err() {
@@ -110,6 +122,10 @@ impl Thumbnails {
         Self::with_mode(tools, ctx, Mode::Timeline)
     }
 
+    pub(super) fn preview(tools: Option<MediaTools>, ctx: &egui::Context) -> Self {
+        Self::with_mode(tools, ctx, Mode::Preview)
+    }
+
     fn with_mode(tools: Option<MediaTools>, ctx: &egui::Context, mode: Mode) -> Self {
         Self {
             ctx: ctx.clone(),
@@ -126,7 +142,54 @@ impl Thumbnails {
     }
 
     pub(super) fn frame(&mut self, path: &Path, timestamp_us: u64) -> Option<&egui::TextureHandle> {
+        self.poll_updates();
         let worker = self.worker.as_ref()?;
+        let key = FrameKey {
+            path: path.to_owned(),
+            timestamp_us,
+        };
+        if !self.cache.contains_key(&key)
+            && !self.pending.contains(&key)
+            && worker.requests.try_send(key.clone()).is_ok()
+        {
+            self.pending.insert(key.clone());
+        }
+        let cached = self.cache.get_mut(&key)?;
+        self.order += 1;
+        cached.last_used = self.order;
+        cached.texture.as_ref()
+    }
+
+    pub(super) fn nearest_frame(
+        &mut self,
+        path: &Path,
+        timestamp_us: u64,
+        tolerance_us: u64,
+    ) -> Option<egui::TextureHandle> {
+        self.poll_updates();
+        let key = self
+            .cache
+            .keys()
+            .filter(|key| key.path == path && key.timestamp_us.abs_diff(timestamp_us) <= tolerance_us)
+            .min_by_key(|key| key.timestamp_us.abs_diff(timestamp_us))
+            .cloned();
+        if let Some(key) = key {
+            self.order += 1;
+            let texture = self.cache.get_mut(&key).and_then(|cached| {
+                cached.last_used = self.order;
+                cached.texture.clone()
+            });
+            if texture.is_some() {
+                return texture;
+            }
+        }
+        self.frame(path, timestamp_us).cloned()
+    }
+
+    fn poll_updates(&mut self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
         for (key, image) in worker.updates.try_iter() {
             self.pending.remove(&key);
             if self.cache.len() >= self.mode.cache_limit()
@@ -154,20 +217,5 @@ impl Thumbnails {
                 },
             );
         }
-
-        let key = FrameKey {
-            path: path.to_owned(),
-            timestamp_us,
-        };
-        if !self.cache.contains_key(&key)
-            && !self.pending.contains(&key)
-            && worker.requests.try_send(key.clone()).is_ok()
-        {
-            self.pending.insert(key.clone());
-        }
-        let cached = self.cache.get_mut(&key)?;
-        self.order += 1;
-        cached.last_used = self.order;
-        cached.texture.as_ref()
     }
 }

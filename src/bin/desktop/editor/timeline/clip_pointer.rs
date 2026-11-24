@@ -85,6 +85,31 @@ impl TimelineView {
         }
         let track = rows.at(timeline, p.y)?;
         let time = view.time_at(p.x);
+        if track.kind == takeseam::editor_timeline::TrackKind::Video {
+            let index = timeline
+                .tracks()
+                .iter()
+                .position(|item| item.id == track.id)?;
+            let row = rows.rect(view, index);
+            for clip in &track.clips {
+                let Some((start, end)) = super::transition_time_range(clip) else {
+                    continue;
+                };
+                for (edge, edge_time) in [(super::Edge::Start, start), (super::Edge::End, end)] {
+                    let edge_x = view.x(edge_time);
+                    if row.contains(p) && (p.x - edge_x).abs() <= 8.0 {
+                        return Some(ClipPress {
+                            drag: ClipDrag {
+                                id: clip.id,
+                                kind: Gesture::Transition(edge),
+                                origin: time,
+                            },
+                            origin: p,
+                        });
+                    }
+                }
+            }
+        }
         let clip = track.clip_at(time)?;
         let index = timeline
             .tracks()

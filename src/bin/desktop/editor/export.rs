@@ -18,7 +18,8 @@ use super::canvas_format::CanvasFormat;
 use super::media::background;
 use super::media::overlays::{Overlays, SCRIPT_NAME, sequence_size};
 use super::media::{
-    MediaInfo, MediaTools, append_clip_volume_filter, hidden_command, local_media, sequence_filter,
+    MediaInfo, MediaTools, append_segment_audio_filters, append_video_fades, hidden_command,
+    local_media, sequence_filter,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,7 +497,7 @@ impl<'a> Segment<'a> {
     }
 
     fn source_position(&self, clip: &Clip) -> u64 {
-        clip.source_start + (self.start - clip.start)
+        clip.source_time_at(self.start)
     }
 }
 
@@ -541,9 +542,30 @@ fn render_segment(
         .audio
         .then(|| audio_mix(&mut ffmpeg, segment, &duration))
         .transpose()?;
-    let input_filter = format!(
-        "fps={}:start_time=0,tpad=stop_mode=clone:stop_duration={duration}",
-        profile.fps
+    let mut input_filter = format!("fps={}:start_time=0", profile.fps);
+    if let Some(clip) = segment.video {
+        if clip.reverse {
+            input_filter.push_str(",reverse");
+        }
+        if clip.speed_milli != 1000 {
+            let _ = write!(
+                input_filter,
+                ",setpts=PTS/{:.3}",
+                f32::from(clip.speed_milli) / 1000.0
+            );
+        }
+        append_video_fades(
+            &mut input_filter,
+            segment.start,
+            clip.start,
+            clip.duration(),
+            clip.fade_in_us,
+            clip.fade_out_us,
+        );
+    }
+    let _ = write!(
+        input_filter,
+        ",tpad=stop_mode=clone:stop_duration={duration}"
     );
     let mut output_filter = String::from("format=yuv420p");
     if process.include_subtitles
@@ -644,7 +666,17 @@ fn audio_mix(command: &mut Command, segment: &Segment<'_>, duration: &str) -> Re
             graph,
             "[{stream}:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur={duration}"
         );
-        append_clip_volume_filter(&mut graph, clip.volume_db_tenths);
+        append_segment_audio_filters(
+            &mut graph,
+            clip.volume_db_tenths,
+            clip.fade_in_us,
+            clip.fade_out_us,
+            segment.start.saturating_sub(clip.start),
+            clip.duration(),
+            segment.end.saturating_sub(segment.start),
+            clip.speed_milli,
+            clip.reverse,
+        );
         if count == 1 {
             graph.push_str("[mix]");
         } else {
@@ -1118,6 +1150,13 @@ mod tests {
                     start: 0,
                     text: None,
                     volume_db_tenths: 0,
+                    transition_in: None,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
                 },
                 Clip {
                     id: 2,
@@ -1128,6 +1167,13 @@ mod tests {
                     start: 900_000,
                     text: None,
                     volume_db_tenths: 0,
+                    transition_in: None,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
                 },
             ],
         )];
@@ -1223,6 +1269,13 @@ mod tests {
             source_end,
             text: None,
             volume_db_tenths: 0,
+            transition_in: None,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
         };
         let tracks = vec![
             video_track(

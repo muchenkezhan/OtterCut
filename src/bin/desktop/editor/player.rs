@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use takeseam::editor_timeline::{Clip, Timeline, Track, TrackKind};
@@ -25,6 +25,7 @@ struct SpanKey {
     canvas_format: CanvasFormat,
     background: BackgroundSettings,
     video: Option<Source>,
+    video_decode_path: Option<PathBuf>,
     audio: Vec<Source>,
     overlay_revision: Option<u64>,
     excluded_overlay: Option<u64>,
@@ -38,6 +39,10 @@ struct Source {
     source_start: u64,
     source_end: u64,
     volume_db_tenths: i16,
+    fade_in_us: u64,
+    fade_out_us: u64,
+    speed_milli: u16,
+    reverse: bool,
 }
 
 impl Source {
@@ -49,13 +54,22 @@ impl Source {
             source_start: clip.source_start,
             source_end: clip.source_end,
             volume_db_tenths: clip.volume_db_tenths,
+            fade_in_us: clip.fade_in_us,
+            fade_out_us: clip.fade_out_us,
+            speed_milli: clip.speed_milli,
+            reverse: clip.reverse,
         }
     }
 
     fn slice(&self, from: u64, to: u64, source_duration: u64, paused: bool) -> Option<MediaSlice> {
         let offset = |time: u64| {
             self.source_start
-                .saturating_add(time.saturating_sub(self.on_timeline))
+                .saturating_add(
+                    time.saturating_sub(self.on_timeline)
+                        .saturating_mul(u64::from(self.speed_milli.max(1)))
+                        .checked_div(1000)
+                        .unwrap_or(u64::MAX),
+                )
         };
         let end = offset(to).min(self.source_end).min(source_duration);
         if end <= self.source_start || (!paused && offset(from) >= end) {
@@ -70,7 +84,18 @@ impl Source {
             id: self.id,
             path: self.path.clone(),
             range: offset(from).min(last)..end,
+            timeline_start: self.on_timeline,
+            timeline_duration_us: self
+                .source_end
+                .saturating_sub(self.source_start)
+                .saturating_mul(1000)
+                .checked_div(u64::from(self.speed_milli.max(1)))
+                .unwrap_or(1),
             volume_db_tenths: self.volume_db_tenths,
+            fade_in_us: self.fade_in_us,
+            fade_out_us: self.fade_out_us,
+            speed_milli: self.speed_milli,
+            reverse: self.reverse,
         })
     }
 }
@@ -84,6 +109,10 @@ impl<'a> Span<'a> {
             source_start: 0,
             source_end: info.duration_us,
             volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            speed_milli: 1000,
+            reverse: false,
         };
         Self {
             key: SpanKey {
@@ -93,6 +122,7 @@ impl<'a> Span<'a> {
                 canvas_format: CanvasFormat::Original,
                 background: BackgroundSettings::default(),
                 video: info.has_video.then(|| source.clone()),
+                video_decode_path: None,
                 audio: info.has_audio.then_some(source).into_iter().collect(),
                 overlay_revision: None,
                 excluded_overlay: None,
@@ -115,6 +145,7 @@ impl<'a> Span<'a> {
             canvas_format: CanvasFormat::Original,
             background: BackgroundSettings::default(),
             video: None,
+            video_decode_path: None,
             audio: Vec::new(),
             overlay_revision: None,
             excluded_overlay: None,
@@ -168,6 +199,11 @@ impl<'a> Span<'a> {
         self
     }
 
+    pub(super) fn with_video_decode_path(mut self, path: Option<PathBuf>) -> Self {
+        self.key.video_decode_path = path;
+        self
+    }
+
     pub(super) fn with_volume_override(mut self, id: Option<u64>, volume: Option<i16>) -> Self {
         let (Some(id), Some(volume)) = (id, volume) else {
             return self;
@@ -199,6 +235,7 @@ impl<'a> Span<'a> {
                 canvas_format: CanvasFormat::Original,
                 background: BackgroundSettings::default(),
                 video: None,
+                video_decode_path: None,
                 audio: Vec::new(),
                 overlay_revision: None,
                 excluded_overlay: None,
@@ -282,10 +319,13 @@ impl<'a> Span<'a> {
         Some(Ok(PreviewPlan {
             timeline_from: from,
             duration_us: key.end.saturating_sub(from).max(1),
+            audio_timeline_start: key.start,
+            audio_position: position,
             size,
             quality,
             background: key.background.clone(),
             video,
+            video_decode_path: key.video_decode_path.clone(),
             audio,
             black_canvas: key.overlay_revision.is_some(),
             overlays: Overlays::in_range_excluding(self.tracks, from..key.end, excluded_overlay),
@@ -295,6 +335,92 @@ impl<'a> Span<'a> {
                 .cursor_effect
                 .clone()
                 .unwrap_or_else(|| CursorEffect::default_for(key.end)),
+        }))
+    }
+
+    fn audio_plan(
+        &self,
+        library: &mut Library,
+        position: u64,
+    ) -> Option<Result<PreviewPlan, String>> {
+        let audio_timeline_start = position;
+        let duration_us = self.key.end.saturating_sub(position).min(400_000).max(1);
+        let mut audio = Vec::new();
+        for source in &self.key.audio {
+            let info = match library.request(&source.path)? {
+                Ok(info) => info,
+                Err(error) => return Some(Err(error.to_owned())),
+            };
+            if info.has_audio
+                && let Some(slice) = source.slice(
+                    position,
+                    position.saturating_add(duration_us),
+                    info.duration_us,
+                    false,
+                )
+            {
+                audio.push(slice);
+            }
+        }
+        Some(Ok(PreviewPlan {
+            timeline_from: audio_timeline_start,
+            duration_us,
+            audio_timeline_start,
+            audio_position: position,
+            size: (2, 2),
+            quality: PreviewQuality::Sixteenth,
+            background: BackgroundSettings::default(),
+            video: None,
+            video_decode_path: None,
+            audio,
+            black_canvas: false,
+            overlays: Overlays::default(),
+            excluded_overlay: None,
+            cursor: None,
+            cursor_effect: CursorEffect::default_for(duration_us),
+        }))
+    }
+
+    fn audio_cache_plan(
+        &self,
+        library: &mut Library,
+        position: u64,
+    ) -> Option<Result<PreviewPlan, String>> {
+        let audio_timeline_start = self.key.start;
+        let duration_us = self.key.end.saturating_sub(audio_timeline_start).max(1);
+        let mut audio = Vec::new();
+        for source in &self.key.audio {
+            let info = match library.request(&source.path)? {
+                Ok(info) => info,
+                Err(error) => return Some(Err(error.to_owned())),
+            };
+            if info.has_audio
+                && let Some(slice) = source.slice(
+                    audio_timeline_start,
+                    self.key.end,
+                    info.duration_us,
+                    false,
+                )
+            {
+                audio.push(slice);
+            }
+        }
+        Some(Ok(PreviewPlan {
+            timeline_from: audio_timeline_start,
+            duration_us,
+            audio_timeline_start,
+            audio_position: position,
+            size: (2, 2),
+            quality: PreviewQuality::Sixteenth,
+            background: BackgroundSettings::default(),
+            video: None,
+            video_decode_path: None,
+            audio,
+            black_canvas: false,
+            overlays: Overlays::default(),
+            excluded_overlay: None,
+            cursor: None,
+            cursor_effect: CursorEffect::default_for(duration_us),
         }))
     }
 }
@@ -356,6 +482,12 @@ pub(super) struct Player {
     quality: PreviewQuality,
     preview: Preview,
     active: Option<Active>,
+    scrubbing: bool,
+    resume_after_scrub: bool,
+    retain_frame_on_sync: bool,
+    last_scrub_audio: Option<Instant>,
+    scrub_audio_prepared: bool,
+    scrub_audio_stop_at: Option<Instant>,
 }
 
 struct Active {
@@ -370,8 +502,115 @@ struct Active {
 
 impl Player {
     pub(super) fn reset(&mut self) {
+        self.scrubbing = false;
+        self.resume_after_scrub = false;
+        self.retain_frame_on_sync = false;
+        self.last_scrub_audio = None;
+        self.scrub_audio_prepared = false;
+        self.scrub_audio_stop_at = None;
         self.active = None;
         self.preview.clear();
+    }
+
+    pub(super) fn begin_seek(&mut self) {
+        if self.scrubbing {
+            return;
+        }
+        self.scrubbing = true;
+        self.resume_after_scrub = self.playing;
+        self.playing = false;
+        self.active = None;
+        self.retain_frame_on_sync = true;
+        self.last_scrub_audio = None;
+        self.scrub_audio_stop_at = None;
+        self.preview.stop();
+    }
+
+    pub(super) fn end_seek(&mut self) {
+        if !self.scrubbing {
+            return;
+        }
+        self.scrubbing = false;
+        self.playing = self.resume_after_scrub;
+        self.resume_after_scrub = false;
+        let had_scrub_audio = self.last_scrub_audio.is_some();
+        self.last_scrub_audio = None;
+        self.active = None;
+        self.scrub_audio_stop_at = had_scrub_audio.then(|| Instant::now() + Duration::from_millis(400));
+    }
+
+    pub(super) fn play_scrub_audio(
+        &mut self,
+        tools: Option<&MediaTools>,
+        span: Span<'_>,
+        library: &mut Library,
+        position: u64,
+    ) {
+        if !self.scrubbing {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .last_scrub_audio
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(100))
+        {
+            return;
+        }
+        self.last_scrub_audio = Some(now);
+        let Some(tools) = tools else {
+            return;
+        };
+        let Some(plan) = span.audio_plan(library, position) else {
+            return;
+        };
+        let Ok(plan) = plan else {
+            return;
+        };
+        if plan.audio.is_empty() {
+            return;
+        }
+        self.preview.play_scrub_audio(
+            tools,
+            plan.audio,
+            plan.duration_us,
+            plan.audio_timeline_start,
+            plan.audio_position,
+        );
+    }
+
+    pub(super) fn prepare_scrub_audio(
+        &mut self,
+        tools: Option<&MediaTools>,
+        span: Span<'_>,
+        library: &mut Library,
+        position: u64,
+    ) {
+        if self.scrub_audio_prepared {
+            return;
+        }
+        let Some(tools) = tools else {
+            return;
+        };
+        let Some(plan) = span.audio_cache_plan(library, position) else {
+            return;
+        };
+        let Ok(plan) = plan else {
+            return;
+        };
+        if plan.audio.is_empty() {
+            return;
+        }
+        self.scrub_audio_prepared = true;
+        self.preview.prepare_scrub_audio(
+            tools,
+            plan.audio,
+            plan.duration_us,
+            plan.audio_timeline_start,
+        );
+    }
+
+    pub(super) fn is_scrubbing(&self) -> bool {
+        self.scrubbing
     }
 
     pub(super) fn toggle(&mut self, position: &mut u64, duration: u64) {
@@ -469,6 +708,16 @@ impl Player {
         library: &mut Library,
         position: u64,
     ) -> Option<String> {
+        if let Some(stop_at) = self.scrub_audio_stop_at {
+            if Instant::now() < stop_at {
+                return None;
+            }
+            self.preview.stop_scrub_audio();
+            self.scrub_audio_stop_at = None;
+        }
+        if self.scrubbing {
+            return None;
+        }
         let Some(span) = span else {
             if self.active.is_some() {
                 self.reset();
@@ -480,6 +729,7 @@ impl Player {
             .as_ref()
             .and_then(|active| active.span.changed_audio_volume(&span.key));
         let volume_only = volume_change.is_some();
+        let retain_frame = self.retain_frame_on_sync;
         let changed = self.active.as_ref().is_none_or(|active| {
             active.span != span.key
                 || active.playing != self.playing
@@ -497,13 +747,13 @@ impl Player {
                     || span.key.background.enabled())
                     && active.span.canvas == span.key.canvas
                     && active.span.video == span.key.video
-                    && (active.from == position
-                        || (active.playing && (active.from..=active.span.end).contains(&position)))
+                    && active.span.start <= position
+                    && position < active.span.end
             });
             if volume_only {
                 // Volume automation is handled by the audio path below. Keep the
                 // video decoder and its current frame alive while the line moves.
-            } else if keep_picture {
+            } else if retain_frame || keep_picture {
                 // Keep the displayed frame and its overlay stamp until the replacement arrives.
                 self.preview.stop();
             } else {
@@ -537,6 +787,7 @@ impl Player {
                 requested: false,
                 error: None,
             });
+            self.retain_frame_on_sync = false;
         }
         let active = self.active.as_mut()?;
         let tools = tools?;

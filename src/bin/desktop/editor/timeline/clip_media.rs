@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::path::Path;
 
 use eframe::egui::{self, Align2, Color32, FontId, Mesh, Painter, Rect, Stroke, pos2, vec2};
 use takeseam::editor_timeline::{Clip, TrackKind};
@@ -29,6 +30,16 @@ impl ClipMedia {
             video: Thumbnails::timeline(tools.clone(), ctx),
             audio: Waveforms::new(tools, ctx),
         }
+    }
+
+    pub(super) fn video_nearest_frame(
+        &mut self,
+        path: &Path,
+        timestamp_us: u64,
+        tolerance_us: u64,
+    ) -> Option<egui::TextureHandle> {
+        self.video
+            .nearest_frame(path, timestamp_us, tolerance_us)
     }
 }
 
@@ -450,6 +461,13 @@ mod tests {
             source_end: 65_664_000,
             start: 57_000_000,
             volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
         };
         let view = Viewport {
             rect: Rect::from_min_size(pos2(100.0, 0.0), vec2(420.0, 36.0)),

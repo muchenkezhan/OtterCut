@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{
-    self, Align2, CursorIcon, FontId, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, pos2,
+    self, Align2, CursorIcon, DragAndDrop, FontId, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, pos2,
     vec2,
 };
 use takeseam::editor_timeline::{Clip, PRIMARY_VIDEO, Timeline, TimelineError, TrackId, TrackKind};
@@ -10,6 +10,7 @@ use crate::ui_icons::paint_razor_cursor;
 use crate::ui_theme::{self, Palette};
 
 use super::media::MediaTools;
+use super::transition_panel::{DraggedTransition, TransitionRole};
 
 #[path = "timeline/canvas.rs"]
 mod canvas;
@@ -78,7 +79,16 @@ pub struct TimelineView {
     volume_changed: bool,
     volume_preview: Option<(u64, i16)>,
     cursor_markers: Vec<u64>,
+    user_markers: Vec<u64>,
+    marker_action: Option<MarkerAction>,
+    transition_drop: Option<TransitionDrop>,
     recognize_audio_track: Option<TrackId>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum MarkerAction {
+    Add(u64),
+    Remove(u64),
 }
 
 pub(super) struct TimelineInput {
@@ -88,7 +98,19 @@ pub(super) struct TimelineInput {
     pub material_drop: Option<MaterialDrop>,
     pub volume_changed: bool,
     pub volume_preview: Option<(u64, i16)>,
+    pub marker_action: Option<MarkerAction>,
+    pub transition_drop: Option<TransitionDrop>,
     pub recognize_audio_track: Option<TrackId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TransitionDrop {
+    pub outgoing: u64,
+    pub incoming: u64,
+    pub id: &'static str,
+    pub name: &'static str,
+    pub role: TransitionRole,
+    pub cut: u64,
 }
 
 pub(super) struct MaterialDrop {
@@ -140,6 +162,22 @@ impl TimelineView {
         self.cursor_markers = markers;
     }
 
+    pub(super) fn set_user_markers(&mut self, markers: Vec<u64>) {
+        self.user_markers = markers;
+    }
+
+    pub(super) fn video_thumbnail_nearest(
+        &mut self,
+        path: &Path,
+        timestamp_us: u64,
+        tolerance_us: u64,
+    ) -> Option<egui::TextureHandle> {
+        self.media
+            .as_mut()?
+            .video_nearest_frame(path, timestamp_us, tolerance_us)
+    }
+
+
     pub(super) fn selected_group(&self, primary: Option<u64>) -> &[u64] {
         let ids = self.marquee.ids();
         if ids.len() > 1 && primary.is_some_and(|id| ids.contains(&id)) {
@@ -159,6 +197,8 @@ impl TimelineView {
     ) -> TimelineInput {
         self.volume_changed = false;
         self.volume_preview = None;
+        self.marker_action = None;
+        self.transition_drop = None;
         self.recognize_audio_track = None;
         normalize_selection(timeline, playhead, selected);
         self.marquee.prune(timeline, *selected);
@@ -167,7 +207,8 @@ impl TimelineView {
         }
         let width = (ui.available_width() - TRACK_HEADER - VERTICAL_SCROLL_WIDTH).max(1.0);
         let input = self.draw_toolbar(ui, timeline, *selected, *playhead, width, add_enabled);
-        let command = if material_drop::is_dragging(ui.ctx()) {
+        let transition_drag = DragAndDrop::has_payload_of_type::<DraggedTransition>(ui.ctx());
+        let command = if material_drop::is_dragging(ui.ctx()) || transition_drag {
             None
         } else {
             input.command.or_else(|| self.keyboard_command(ui))
@@ -229,9 +270,135 @@ impl TimelineView {
             material_drop,
             volume_changed: self.volume_changed,
             volume_preview: self.volume_preview,
+            marker_action: self.marker_action,
+            transition_drop: self.transition_drop,
             recognize_audio_track: self.recognize_audio_track,
         }
     }
+
+    fn handle_transition_drop(
+        &mut self,
+        ui: &Ui,
+        view: Viewport,
+        rows: Rows<'_>,
+        timeline: &Timeline,
+    ) {
+        let (pointer, released, held, focused) = ui.input(|input| {
+            let release = input.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => Some(*pos),
+                _ => None,
+            });
+            (
+                release.or(input.pointer.interact_pos().or(input.pointer.latest_pos())),
+                input.pointer.primary_released(),
+                input.pointer.primary_down(),
+                input.viewport().focused.unwrap_or(true),
+            )
+        });
+        if !focused || (!held && !released) {
+            DragAndDrop::clear_payload(ui.ctx());
+            return;
+        }
+        let Some(pointer) = pointer.filter(|pointer| view.rect.contains(*pointer)) else {
+            if released {
+                DragAndDrop::clear_payload(ui.ctx());
+            }
+            return;
+        };
+        let at = view.time_at(pointer.x);
+        let Some(transition) = DragAndDrop::payload::<DraggedTransition>(ui.ctx()) else {
+            if released {
+                DragAndDrop::clear_payload(ui.ctx());
+            }
+            return;
+        };
+        let target = match transition.role {
+            TransitionRole::Entrance => {
+                Self::transition_entrance_at(rows, timeline, pointer.y, at, view.scale)
+                    .map(|incoming| (0, incoming.id, incoming.start))
+            }
+            TransitionRole::Exit => {
+                Self::transition_exit_at(rows, timeline, pointer.y, at, view.scale)
+                    .map(|outgoing| (outgoing.id, 0, outgoing.end()))
+            }
+            TransitionRole::Cut => Self::transition_cut_at(rows, timeline, pointer.y, at, view.scale),
+        };
+        let Some((outgoing, incoming, cut)) = target else {
+            ui.ctx().set_cursor_icon(CursorIcon::NotAllowed);
+            if released {
+                DragAndDrop::clear_payload(ui.ctx());
+            }
+            return;
+        };
+        ui.ctx().set_cursor_icon(CursorIcon::Copy);
+        if released {
+            let transition = DragAndDrop::take_payload::<DraggedTransition>(ui.ctx())
+                .unwrap_or(transition);
+            self.transition_drop = Some(TransitionDrop {
+                outgoing,
+                incoming,
+                id: transition.id,
+                name: transition.name,
+                role: transition.role,
+                cut,
+            });
+        }
+    }
+
+fn transition_cut_at(
+    rows: Rows<'_>,
+    timeline: &Timeline,
+    y: f32,
+    at: u64,
+    scale: f64,
+) -> Option<(u64, u64, u64)> {
+    let track = rows.at(timeline, y).filter(|track| track.kind == TrackKind::Video)
+        .or_else(|| timeline.tracks().iter().find(|track| track.kind == TrackKind::Video));
+    let track = track?;
+    let tolerance = (12.0 * SECOND / scale.max(0.01)) as u64;
+    track
+        .clips
+        .windows(2)
+        .filter_map(|clips| {
+            let outgoing = &clips[0];
+            let incoming = &clips[1];
+            let cut = outgoing.end();
+            (cut.abs_diff(incoming.start) <= tolerance && cut.abs_diff(at) <= tolerance)
+                .then_some((outgoing.id, incoming.id, incoming.start))
+        })
+        .min_by_key(|(_, _, cut)| cut.abs_diff(at))
+}
+
+fn transition_entrance_at<'a>(
+    rows: Rows<'a>,
+    timeline: &'a Timeline,
+    y: f32,
+    at: u64,
+    scale: f64,
+) -> Option<&'a Clip> {
+    let track = rows.at(timeline, y).filter(|track| track.kind == TrackKind::Video)
+        .or_else(|| timeline.tracks().iter().find(|track| track.kind == TrackKind::Video))?;
+    let tolerance = (12.0 * SECOND / scale.max(0.01)) as u64;
+    track.clips.iter().find(|clip| clip.start.abs_diff(at) <= tolerance)
+}
+
+fn transition_exit_at<'a>(
+    rows: Rows<'a>,
+    timeline: &'a Timeline,
+    y: f32,
+    at: u64,
+    scale: f64,
+) -> Option<&'a Clip> {
+    let track = rows.at(timeline, y).filter(|track| track.kind == TrackKind::Video)
+        .or_else(|| timeline.tracks().iter().find(|track| track.kind == TrackKind::Video))?;
+    let tolerance = (12.0 * SECOND / scale.max(0.01)) as u64;
+    track.clips.iter().find(|clip| clip.end().abs_diff(at) <= tolerance)
+}
 
     fn scale(&self) -> f64 {
         self.scale.unwrap_or(DEFAULT_SCALE)
@@ -330,6 +497,7 @@ impl TimelineView {
             .saturating_add(TRAILING_SPACE)
             .max(MIN_HORIZON);
         let material_drag = material_drop::is_dragging(ui.ctx());
+        let transition_drag = DragAndDrop::has_payload_of_type::<DraggedTransition>(ui.ctx());
         let boundaries = Rows::measure(timeline);
         // Keep the complete track group vertically centered while it fits.
         // Once the rows need scrolling, retain a small reachable edge band.
@@ -348,7 +516,7 @@ impl TimelineView {
         self.vertical_scroll = rows.offset.clamp(0.0, max_vertical);
         self.handle_wheel(ui, content, rect, max_vertical);
         rows.offset = self.vertical_scroll;
-        if !material_drag {
+        if !material_drag && !transition_drag {
             self.capture_clip_drag(
                 ui,
                 timeline,
@@ -366,7 +534,8 @@ impl TimelineView {
                 *selected = Some(drag.id);
             }
         }
-        let dragging = self.drag.is_some() || (material_drag && ui.rect_contains_pointer(content));
+        let dragging = self.drag.is_some()
+            || ((material_drag || transition_drag) && ui.rect_contains_pointer(content));
         if dragging
             && !self
                 .drag
@@ -386,13 +555,16 @@ impl TimelineView {
             scale: self.scale(),
             scroll: self.scroll,
         };
+        if transition_drag {
+            self.handle_transition_drop(ui, view, rows, timeline);
+        }
         let selecting = self.marquee.observe(
             ui,
             timeline,
             view,
             rows,
             selected,
-            !dragging && !material_drag && self.mode == Mode::Select,
+            !dragging && !material_drag && !transition_drag && self.mode == Mode::Select,
         );
         let colors = ui_theme::palette(ui.ctx());
         let painter = ui.painter_at(rect);
@@ -492,6 +664,7 @@ impl TimelineView {
                     timeline,
                     self.clipboard.as_ref(),
                     self.marquee.ids(),
+                    &self.user_markers,
                 )
             {
                 self.apply_context_action(action, timeline, playhead, selected)?;
@@ -588,6 +761,28 @@ impl TimelineView {
                 );
             }
         }
+        for &marker in &self.user_markers {
+            let x = view.x(marker);
+            if strip.x_range().contains(x) {
+                let center = pos2(x, strip.center().y - 1.0);
+                let points = [
+                    pos2(center.x, center.y - 5.0),
+                    pos2(center.x + 4.0, center.y),
+                    pos2(center.x, center.y + 5.0),
+                    pos2(center.x - 4.0, center.y),
+                ];
+                painter.add(egui::Shape::convex_polygon(
+                    points.to_vec(),
+                    colors.recording,
+                    Stroke::NONE,
+                ));
+                painter.vline(
+                    x,
+                    strip.top()..=rows.area.bottom(),
+                    Stroke::new(1.0, colors.recording.gamma_multiply(0.4)),
+                );
+            }
+        }
     }
 
     fn seek_on_canvas(&self, ui: &Ui, view: Viewport, duration: u64, playhead: &mut u64) {
@@ -667,6 +862,54 @@ impl TimelineView {
             volume,
         );
         painter.rect_stroke(rect, 0, Stroke::new(1.0_f32, border), StrokeKind::Inside);
+        if lane.kind == TrackKind::Video {
+            paint_transition_block(painter, lane.view, lane.rect, clip, colors);
+            if self.drag.is_none()
+                && let Some((transition_start, transition_end)) = transition_time_range(clip)
+            {
+                for (edge, time) in [
+                    (Edge::Start, transition_start),
+                    (Edge::End, transition_end),
+                ] {
+                    let x = lane.view.x(time);
+                    let handle = Rect::from_min_max(
+                        pos2(x - 6.0, rect.top() - 2.0),
+                        pos2(x + 6.0, rect.bottom() + 2.0),
+                    )
+                    .intersect(ui.clip_rect());
+                    if !handle.is_positive() {
+                        continue;
+                    }
+                    let response = ui.interact(
+                        handle,
+                        ui.id().with((
+                            "transition-handle",
+                            clip.id,
+                            matches!(edge, Edge::Start),
+                        )),
+                        Sense::click_and_drag(),
+                    );
+                    let response = response.on_hover_cursor(CursorIcon::ResizeHorizontal);
+                    if response.hovered() || response.dragged() {
+                        painter.vline(
+                            x,
+                            rect.top()..=rect.bottom(),
+                            Stroke::new(2.0, colors.text),
+                        );
+                    }
+                    if response.drag_started()
+                        && let Some(pointer) = response.interact_pointer_pos()
+                    {
+                        self.drag = Some(ClipDrag {
+                            id: clip.id,
+                            kind: Gesture::Transition(edge),
+                            origin: lane.view.time_at(pointer.x),
+                        });
+                        self.track = Some(lane.id);
+                    }
+                }
+            }
+        }
         let line = self.mode.volume_line(rect, handle, lane.kind);
         if let Some(line) = line {
             let hovering = ui.rect_contains_pointer(line.hit(volume).intersect(visible));
@@ -1083,6 +1326,83 @@ impl TimelineView {
     }
 }
 
+fn paint_transition_block(
+    painter: &egui::Painter,
+    view: Viewport,
+    lane: Rect,
+    clip: &Clip,
+    colors: &Palette,
+) {
+    let Some(transition) = &clip.transition_in else {
+        return;
+    };
+    let Some((start, end)) = transition_time_range(clip) else {
+        return;
+    };
+    let mut block = view.clip_rect(lane, start, end).shrink2(vec2(1.0, 1.0));
+    block = block.intersect(painter.clip_rect());
+    if !block.is_positive() {
+        return;
+    }
+    let fill = colors.accent.gamma_multiply(0.24);
+    let border = colors.text.gamma_multiply(0.92);
+    painter.rect_filled(block, 3.0, fill);
+    painter.rect_stroke(block, 3.0, Stroke::new(1.5, border), StrokeKind::Inside);
+    painter.vline(
+        block.left() + 2.0,
+        block.top()..=block.bottom(),
+        Stroke::new(2.0, border),
+    );
+    painter.vline(
+        block.right() - 2.0,
+        block.top()..=block.bottom(),
+        Stroke::new(2.0, border),
+    );
+    let center = block.center();
+    painter.line_segment(
+        [pos2(center.x - 11.0, center.y), pos2(center.x + 11.0, center.y)],
+        Stroke::new(1.5, border),
+    );
+    painter.line_segment(
+        [pos2(center.x - 11.0, center.y), pos2(center.x - 6.0, center.y - 4.0)],
+        Stroke::new(1.5, border),
+    );
+    painter.line_segment(
+        [pos2(center.x - 11.0, center.y), pos2(center.x - 6.0, center.y + 4.0)],
+        Stroke::new(1.5, border),
+    );
+    painter.line_segment(
+        [pos2(center.x + 11.0, center.y), pos2(center.x + 6.0, center.y - 4.0)],
+        Stroke::new(1.5, border),
+    );
+    painter.line_segment(
+        [pos2(center.x + 11.0, center.y), pos2(center.x + 6.0, center.y + 4.0)],
+        Stroke::new(1.5, border),
+    );
+    if block.width() >= 54.0 && !transition.name.is_empty() {
+        painter.text(
+            pos2(block.left() + 7.0, block.top() + 7.0),
+            egui::Align2::LEFT_CENTER,
+            &transition.name,
+            FontId::proportional(9.0),
+            colors.text,
+        );
+    }
+}
+
+pub(super) fn transition_time_range(clip: &Clip) -> Option<(u64, u64)> {
+    let transition = clip.transition_in.as_ref()?;
+    let duration = transition.duration_us.min(clip.duration().max(1));
+    Some(match transition.role.as_str() {
+        "入场" => (clip.start, clip.start.saturating_add(duration)),
+        "出场" => (clip.end().saturating_sub(duration), clip.end()),
+        _ => (
+            clip.start.saturating_sub(duration / 2),
+            clip.start.saturating_add(duration / 2),
+        ),
+    })
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Mode {
     #[default]
@@ -1218,6 +1538,48 @@ impl Mode {
     }
 }
 
+#[cfg(test)]
+mod transition_cut_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use takeseam::editor_timeline::Timeline;
+
+    #[test]
+    fn transition_drop_requires_a_cut_between_two_video_clips() {
+        let mut timeline = Timeline::default();
+        timeline
+            .insert_media(PathBuf::from("first.mp4"), 1_000_000, 0)
+            .unwrap();
+        timeline
+            .insert_media(PathBuf::from("second.mp4"), 1_000_000, 1_000_000)
+            .unwrap();
+        let boundaries = Rows::measure(&timeline);
+        let rows = Rows {
+            area: Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 240.0)),
+            edge_band: 0.0,
+            offset: 0.0,
+            boundaries: &boundaries,
+        };
+
+        assert!(TimelineView::transition_cut_at(
+            rows,
+            &timeline,
+            70.0,
+            1_000_000,
+            DEFAULT_SCALE,
+        )
+        .is_some());
+        assert!(TimelineView::transition_cut_at(
+            rows,
+            &timeline,
+            70.0,
+            1_500_000,
+            DEFAULT_SCALE,
+        )
+        .is_none());
+    }
+}
+
 impl Edge {
     fn x(self, rect: Rect) -> f32 {
         match self {
@@ -1235,6 +1597,7 @@ impl Gesture {
             }
             Self::Move | Self::Reorder => CursorIcon::Grab,
             Self::Volume { .. } => CursorIcon::ResizeVertical,
+            Self::Transition(_) => CursorIcon::ResizeHorizontal,
         }
     }
 
@@ -1250,6 +1613,7 @@ impl Gesture {
             Self::Slip => "拖动改变片段取用的素材区间",
             Self::Slide => "拖动并同步修剪两个邻居",
             Self::Volume { .. } => "上下拖动调整音量",
+            Self::Transition(_) => "拖动转场边界调整时长",
         }
     }
 }

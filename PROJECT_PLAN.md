@@ -49,7 +49,7 @@ OtterCut 是一款面向教程作者、开发者和产品演示人员的开源�
 用户可输入「剪掉开头 3 秒，把麦克风降低 6 dB」。助手读取当前时间线，把指令转换为结构化剪辑操作。时间线先显示受影响的片段和音轨，应用后立即更新预览。一次操作批次对应一条撤销记录。
 
 - **统一执行**。手动操作、内置助手和外部 MCP 助手共用 Rust 剪辑命令。核心校验片段 ID、时间范围和工程修订号。若预览后工程发生变化，重新生成剪辑预览。应用以整批为单位提交，重试可返回原结果，避免重复剪切。
-- **MCP 服务**。首版采用本地 `stdio`。MCP 子进程把结构化请求转给桌面进程，由桌面端统一写入工程。首批工具为 `get_timeline`、`preview_edits`、`apply_edits`，分别用于读取时间线、验证并预览操作、应用预览结果。工具只操作已连接的工程和其中的素材 ID。 [MCP 工具文档](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) · [MCP stdio 文档](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio)
+- **MCP 服务**。当前已实现独立本地 `stdio` 入口和只读 `get_timeline` 工具，可以读取指定 `.takeproj` 的轨道、片段和字幕信息。后续由 MCP 子进程通过桌面进程通信接入实时工程状态，再补充 `preview_edits`、`apply_edits` 和统一撤销。工具只操作已连接的工程和其中的素材 ID。 [MCP 工具文档](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) · [MCP stdio 文档](https://ts.sdk.modelcontextprotocol.io/v2/serving/stdio)
 - **模型接入**。首版接入一个支持结构化输出的模型，先验证中英文剪辑指令。发送给在线模型的默认上下文限于指令、必要的片段元数据与时间码。录屏和音频保留在本地，后续扩展本地模型与转写服务。
 - **内容理解**。后续基于带时间戳的转写支持「删掉我说错版本号的那段」，基于音频检测支持「去掉超过两秒的静音」。定位结果复用同一套剪辑预览、应用和撤销流程。
 

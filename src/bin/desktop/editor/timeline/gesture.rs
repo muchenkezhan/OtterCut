@@ -12,6 +12,7 @@ pub(super) enum Gesture {
     Slip,
     Slide,
     Volume { line: VolumeLine, offset: f32 },
+    Transition(Edge),
 }
 
 impl Gesture {
@@ -50,7 +51,7 @@ impl ClipDrag {
         let anchors: &[_] = match self.kind {
             Gesture::Trim(edge, _) | Gesture::Roll(edge) => &[edge.time(clip)],
             Gesture::Move | Gesture::Slide => &[clip.start, clip.end()],
-            Gesture::Reorder | Gesture::Slip | Gesture::Volume { .. } => return delta,
+            Gesture::Reorder | Gesture::Slip | Gesture::Volume { .. } | Gesture::Transition(_) => return delta,
         };
         let edges = timeline
             .all_clips()
@@ -193,6 +194,14 @@ impl ClipDrag {
             Gesture::Volume { line, offset } => {
                 draft.action = Edit::Volume(line.value_at(pointer_y - offset));
             }
+            Gesture::Transition(edge) => {
+                let Some(transition) = &clip.transition_in else {
+                    return Err(TimelineError::ClipNotFound(clip.id));
+                };
+                let duration = transition_duration_at(clip, &transition.role, edge, pointer);
+                draft.action = Edit::Transition(duration);
+                draft.ghost = Some(transition_span(clip, &transition.role, duration));
+            }
         }
         Ok(draft)
     }
@@ -206,6 +215,7 @@ enum Edit {
     Slip(i64),
     Slide(i64),
     Volume(i16),
+    Transition(u64),
 }
 
 pub(super) struct Draft {
@@ -248,6 +258,7 @@ impl Draft {
             Edit::Slip(delta) => timeline.slip(self.id, delta),
             Edit::Slide(delta) => timeline.slide(self.id, delta),
             Edit::Volume(db_tenths) => timeline.set_clip_volume(self.id, db_tenths),
+            Edit::Transition(duration) => timeline.set_clip_transition_duration(self.id, duration),
         }
     }
 }
@@ -279,6 +290,33 @@ fn trim_delta(
             let max = difference(clip.trim_tailroom(), 0).min(difference(latest, clip.end()));
             delta.clamp(difference(1, clip.duration()), max)
         }
+    }
+}
+
+fn transition_duration_at(clip: &Clip, role: &str, edge: Edge, pointer: u64) -> u64 {
+    match role {
+        "入场" => pointer.saturating_sub(clip.start).clamp(50_000, clip.duration()),
+        "出场" => clip.end().saturating_sub(pointer).clamp(50_000, clip.duration()),
+        _ => {
+            let distance = match edge {
+                Edge::Start => clip.start.abs_diff(pointer),
+                Edge::End => pointer.abs_diff(clip.start),
+            };
+            distance
+                .saturating_mul(2)
+                .clamp(50_000, clip.duration().saturating_mul(2))
+        }
+    }
+}
+
+fn transition_span(clip: &Clip, role: &str, duration: u64) -> (u64, u64) {
+    match role {
+        "入场" => (clip.start, clip.start.saturating_add(duration)),
+        "出场" => (clip.end().saturating_sub(duration), clip.end()),
+        _ => (
+            clip.start.saturating_sub(duration / 2),
+            clip.start.saturating_add(duration / 2),
+        ),
     }
 }
 

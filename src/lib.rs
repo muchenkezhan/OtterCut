@@ -28,6 +28,8 @@ pub mod camera;
 mod click_follow;
 pub mod editor_timeline;
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+pub mod mcp;
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub mod microphone;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod platform;

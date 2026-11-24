@@ -6,6 +6,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, Ordering};
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -23,7 +24,7 @@ pub(super) mod background;
 #[path = "media/overlays.rs"]
 pub(super) mod overlays;
 
-use audio::AudioDecode;
+use audio::{AudioDecode, ScrubAudio};
 use overlays::{DEFAULT_CANVAS, Overlays, SCRIPT_NAME, VIDEO_FPS};
 
 #[cfg(windows)]
@@ -31,8 +32,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PREVIEW_TICK: Duration = Duration::from_millis(15);
 const USECS_PER_SEC: u64 = 1_000_000;
 const THUMBNAIL_SIZE: [usize; 2] = [320, 180];
+const PREVIEW_THUMBNAIL_SIZE: [usize; 2] = [640, 360];
 const FILMSTRIP_SIZE: [usize; 2] = [144, 81];
 const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(5);
+const PREVIEW_CACHE_CAPACITY: usize = 8;
 
 #[derive(Clone)]
 pub struct MediaTools {
@@ -152,6 +155,21 @@ impl MediaTools {
         stopped: &AtomicBool,
     ) -> Result<egui::ColorImage> {
         thumbnail(&self.ffmpeg, path, timestamp_us, FILMSTRIP_SIZE, stopped)
+    }
+
+    pub(super) fn preview_thumbnail(
+        &self,
+        path: &Path,
+        timestamp_us: u64,
+        stopped: &AtomicBool,
+    ) -> Result<egui::ColorImage> {
+        thumbnail(
+            &self.ffmpeg,
+            path,
+            timestamp_us,
+            PREVIEW_THUMBNAIL_SIZE,
+            stopped,
+        )
     }
 }
 
@@ -418,11 +436,108 @@ fn seconds(usecs: u64) -> String {
     format!("{}.{:06}", usecs / USECS_PER_SEC, usecs % USECS_PER_SEC)
 }
 
-pub(super) fn append_clip_volume_filter(graph: &mut String, volume_db_tenths: i16) {
+pub(super) fn append_video_fades(
+    filter: &mut String,
+    timeline_from: u64,
+    clip_start: u64,
+    clip_duration_us: u64,
+    fade_in_us: u64,
+    fade_out_us: u64,
+) {
+    use std::fmt::Write as _;
+
+    let offset = timeline_from.saturating_sub(clip_start);
+    if fade_in_us > offset {
+        let duration = fade_in_us
+            .saturating_sub(offset)
+            .max(1) as f64
+            / 1_000_000.0;
+        let _ = write!(filter, ",fade=t=in:d={duration:.6}:color=black");
+    }
+    let fade_start = clip_duration_us
+        .saturating_sub(fade_out_us)
+        .saturating_sub(offset);
+    if fade_out_us > 0 && fade_start < clip_duration_us.saturating_sub(offset) {
+        let duration = fade_out_us
+            .min(clip_duration_us.saturating_sub(offset).saturating_sub(fade_start))
+            .max(1) as f64
+            / 1_000_000.0;
+        let start = fade_start as f64 / 1_000_000.0;
+        let _ = write!(filter, ",fade=t=out:st={start:.6}:d={duration:.6}:color=black");
+    }
+}
+
+pub(super) fn append_clip_audio_filters(
+    graph: &mut String,
+    volume_db_tenths: i16,
+    fade_in_us: u64,
+    fade_out_us: u64,
+    duration_us: u64,
+    speed_milli: u16,
+    reverse: bool,
+) {
     use std::fmt::Write as _;
 
     if volume_db_tenths != 0 {
         let _ = write!(graph, ",volume={:.1}dB", f32::from(volume_db_tenths) / 10.0);
+    }
+    if reverse {
+        graph.push_str(",areverse");
+    }
+    if speed_milli != 1000 {
+        let _ = write!(graph, ",atempo={:.3}", f32::from(speed_milli) / 1000.0);
+    }
+    if fade_in_us > 0 {
+        let duration = fade_in_us.min(duration_us).max(1) as f64 / 1_000_000.0;
+        let _ = write!(graph, ",afade=t=in:d={duration:.6}");
+    }
+    if fade_out_us > 0 {
+        let fade = fade_out_us.min(duration_us).max(1) as f64 / 1_000_000.0;
+        let start = duration_us.saturating_sub(fade_out_us) as f64 / 1_000_000.0;
+        let _ = write!(graph, ",afade=t=out:st={start:.6}:d={fade:.6}");
+    }
+}
+
+pub(super) fn append_segment_audio_filters(
+    graph: &mut String,
+    volume_db_tenths: i16,
+    fade_in_us: u64,
+    fade_out_us: u64,
+    clip_offset_us: u64,
+    clip_duration_us: u64,
+    segment_duration_us: u64,
+    speed_milli: u16,
+    reverse: bool,
+) {
+    use std::fmt::Write as _;
+
+    if volume_db_tenths != 0 {
+        let _ = write!(graph, ",volume={:.1}dB", f32::from(volume_db_tenths) / 10.0);
+    }
+    if reverse {
+        graph.push_str(",areverse");
+    }
+    if speed_milli != 1000 {
+        let _ = write!(graph, ",atempo={:.3}", f32::from(speed_milli) / 1000.0);
+    }
+    if fade_in_us > clip_offset_us {
+        let duration = fade_in_us
+            .saturating_sub(clip_offset_us)
+            .min(segment_duration_us)
+            .max(1) as f64
+            / 1_000_000.0;
+        let _ = write!(graph, ",afade=t=in:d={duration:.6}");
+    }
+    let fade_start = clip_duration_us
+        .saturating_sub(fade_out_us)
+        .saturating_sub(clip_offset_us);
+    if fade_out_us > 0 && fade_start < segment_duration_us {
+        let duration = fade_out_us
+            .min(segment_duration_us.saturating_sub(fade_start))
+            .max(1) as f64
+            / 1_000_000.0;
+        let start = fade_start as f64 / 1_000_000.0;
+        let _ = write!(graph, ",afade=t=out:st={start:.6}:d={duration:.6}");
     }
 }
 
@@ -431,6 +546,8 @@ pub struct Preview {
     texture: Option<PreviewTexture>,
     session: Option<PreviewSession>,
     retired_video: Vec<thread::JoinHandle<()>>,
+    cached_frames: VecDeque<CachedFrame>,
+    scrub_audio: Option<ScrubAudio>,
     error: Option<String>,
     audio_error: Option<String>,
 }
@@ -439,6 +556,22 @@ struct PreviewTexture {
     handle: egui::TextureHandle,
     composition_size: (u32, u32),
     excluded_overlay: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PreviewCacheKey {
+    path: PathBuf,
+    source_start: u64,
+    source_end: u64,
+    timeline_from: u64,
+    size: [usize; 2],
+    composition_size: (u32, u32),
+    excluded_overlay: Option<u64>,
+}
+
+struct CachedFrame {
+    key: PreviewCacheKey,
+    pixels: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -523,22 +656,47 @@ pub(super) struct MediaSlice {
     pub id: u64,
     pub path: PathBuf,
     pub range: std::ops::Range<u64>,
+    pub timeline_start: u64,
+    pub timeline_duration_us: u64,
     pub volume_db_tenths: i16,
+    pub fade_in_us: u64,
+    pub fade_out_us: u64,
+    pub speed_milli: u16,
+    pub reverse: bool,
 }
 
 pub(super) struct PreviewPlan {
     pub timeline_from: u64,
     pub duration_us: u64,
+    pub audio_timeline_start: u64,
+    pub audio_position: u64,
     pub size: (u32, u32),
     pub quality: PreviewQuality,
     pub background: super::background::BackgroundSettings,
     pub video: Option<MediaSlice>,
+    pub video_decode_path: Option<PathBuf>,
     pub audio: Vec<MediaSlice>,
     pub black_canvas: bool,
     pub overlays: Overlays,
     pub excluded_overlay: Option<u64>,
     pub cursor: Option<super::cursor_effect::CursorTelemetry>,
     pub cursor_effect: super::cursor_effect::CursorEffect,
+}
+
+fn preview_cache_key(plan: &PreviewPlan) -> Option<PreviewCacheKey> {
+    let video = plan.video.as_ref()?;
+    if !plan.overlays.is_empty() || plan.background.enabled() || plan.cursor.is_some() {
+        return None;
+    }
+    Some(PreviewCacheKey {
+        path: video.path.clone(),
+        source_start: video.range.start,
+        source_end: video.range.end,
+        timeline_from: plan.timeline_from,
+        size: plan.quality.raster_size(plan.size),
+        composition_size: plan.size,
+        excluded_overlay: plan.excluded_overlay,
+    })
 }
 
 impl Preview {
@@ -549,19 +707,40 @@ impl Preview {
         plan: PreviewPlan,
         playing: bool,
     ) {
+        self.stop_scrub_audio();
         self.stop();
         self.error = None;
         self.audio_error = None;
+        let cache_key = preview_cache_key(&plan);
+        if !playing
+            && let Some(key) = cache_key.as_ref()
+            && let Some(cached) = self.cached_frames.iter().find(|frame| frame.key == *key)
+        {
+            self.publish_texture(
+                ctx,
+                cached.pixels.clone(),
+                key.size,
+                key.composition_size,
+                key.excluded_overlay,
+            );
+            return;
+        }
         let has_audio = playing && !plan.audio.is_empty();
         let has_picture = plan.video.is_some() || plan.black_canvas || plan.background.enabled();
         let mut session =
             PreviewSession::new(plan.size, plan.quality, has_picture, has_audio, playing);
         session.excluded_overlay = plan.excluded_overlay;
+        session.cache_key = cache_key;
         if has_picture {
             let path = match plan
                 .video
                 .as_ref()
-                .map(|source| local_media(&source.path))
+                .map(|source| {
+                    plan.video_decode_path
+                        .as_deref()
+                        .unwrap_or(&source.path)
+                })
+                .map(local_media)
                 .transpose()
             {
                 Ok(path) => path,
@@ -572,9 +751,26 @@ impl Preview {
             };
             let (frames, incoming) = mpsc::sync_channel(4);
             session.frames = Some(incoming);
-            let (from_us, until_us) = plan.video.map_or((0, plan.duration_us), |source| {
+            let (from_us, until_us) = plan.video.as_ref().map_or((0, plan.duration_us), |source| {
                 (source.range.start, source.range.end)
             });
+            let (speed_milli, reverse) = plan
+                .video
+                .as_ref()
+                .map(|source| (source.speed_milli, source.reverse))
+                .unwrap_or((1000, false));
+            let (timeline_start, timeline_duration_us, fade_in_us, fade_out_us) = plan
+                .video
+                .as_ref()
+                .map(|source| {
+                    (
+                        source.timeline_start,
+                        source.timeline_duration_us,
+                        source.fade_in_us,
+                        source.fade_out_us,
+                    )
+                })
+                .unwrap_or((0, plan.duration_us, 0, 0));
             let video = VideoDecode {
                 executable: tools.ffmpeg.clone(),
                 path,
@@ -587,6 +783,12 @@ impl Preview {
                 composition_size: session.composition_size,
                 timeline_from: plan.timeline_from,
                 timeline_duration: plan.duration_us,
+                speed_milli,
+                reverse,
+                timeline_start,
+                timeline_duration_us,
+                fade_in_us,
+                fade_out_us,
                 overlays: plan.overlays,
                 backdrop: plan.background,
                 cursor: plan.cursor,
@@ -632,6 +834,49 @@ impl Preview {
         ctx.request_repaint();
     }
 
+    pub(super) fn play_scrub_audio(
+        &mut self,
+        tools: &MediaTools,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+        position: u64,
+    ) {
+        if sources.is_empty() {
+            return;
+        }
+        if self.scrub_audio.is_none() {
+            self.scrub_audio = ScrubAudio::new().ok();
+        }
+        if let Some(audio) = &self.scrub_audio {
+            audio.play(
+                &tools.ffmpeg,
+                sources,
+                duration_us,
+                timeline_start,
+                position,
+            );
+        }
+    }
+
+    pub(super) fn prepare_scrub_audio(
+        &mut self,
+        tools: &MediaTools,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+    ) {
+        if sources.is_empty() {
+            return;
+        }
+        if self.scrub_audio.is_none() {
+            self.scrub_audio = ScrubAudio::new().ok();
+        }
+        if let Some(audio) = &self.scrub_audio {
+            audio.prepare(&tools.ffmpeg, sources, duration_us, timeline_start);
+        }
+    }
+
     /// Changes one source's gain without restarting FFmpeg or the video decoder.
     pub(super) fn set_live_volume(&mut self, source_id: u64, db_tenths: i16) {
         if let Some(session) = &self.session {
@@ -647,6 +892,7 @@ impl Preview {
     }
 
     pub fn stop(&mut self) {
+        self.stop_scrub_audio();
         if let Some(mut session) = self.session.take() {
             self.retired_video.extend(session.video_worker.take());
             // Cancel FFmpeg and drop the receiver before a worker can be joined.
@@ -664,43 +910,50 @@ impl Preview {
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         self.reap_video_workers();
-        let Some(session) = &mut self.session else {
-            return;
+        let (errors, frame_data, repaint) = {
+            let Some(session) = &mut self.session else {
+                return;
+            };
+            let errors = session.errors.try_iter().collect::<Vec<_>>();
+            let frame_data = session.latest_frame().map(|frame| {
+                (
+                    frame.pixels,
+                    session.size,
+                    session.composition_size,
+                    session.excluded_overlay,
+                    session.cache_key.clone(),
+                )
+            });
+            let mut repaint = false;
+            if session.playing
+                && let Some(first_frame_at) = session.first_frame_at
+            {
+                if session.playback.audio_ready.load(Ordering::Acquire)
+                    || first_frame_at.elapsed() > Duration::from_millis(700)
+                {
+                    session
+                        .playback
+                        .epoch
+                        .get_or_init(|| Instant::now() + Duration::from_millis(15));
+                }
+                repaint = session.frames.is_some() || session.playback.epoch.get().is_none();
+            }
+            (errors, frame_data, repaint)
         };
-        for error in session.errors.try_iter() {
+        for error in errors {
             match error {
                 PreviewError::Video(error) => self.error = Some(error),
                 PreviewError::Audio(error) => self.audio_error = Some(error),
             }
         }
-        if let Some(frame) = session.latest_frame() {
-            let image = egui::ColorImage::from_rgba_unmultiplied(session.size, &frame.pixels);
-            if let Some(texture) = &mut self.texture {
-                texture.handle.set(image, egui::TextureOptions::LINEAR);
-                texture.composition_size = session.composition_size;
-                texture.excluded_overlay = session.excluded_overlay;
-            } else {
-                self.texture = Some(PreviewTexture {
-                    handle: ctx.load_texture("editor-preview", image, egui::TextureOptions::LINEAR),
-                    composition_size: session.composition_size,
-                    excluded_overlay: session.excluded_overlay,
-                });
+        if let Some((pixels, size, composition_size, excluded_overlay, cache_key)) = frame_data {
+            if let Some(key) = cache_key {
+                self.cache_frame(key, &pixels);
             }
+            self.publish_texture(ctx, pixels, size, composition_size, excluded_overlay);
         }
-        if session.playing
-            && let Some(first_frame_at) = session.first_frame_at
-        {
-            if session.playback.audio_ready.load(Ordering::Acquire)
-                || first_frame_at.elapsed() > Duration::from_millis(700)
-            {
-                session
-                    .playback
-                    .epoch
-                    .get_or_init(|| Instant::now() + Duration::from_millis(15));
-            }
-            if session.frames.is_some() || session.playback.epoch.get().is_none() {
-                ctx.request_repaint_after(PREVIEW_TICK);
-            }
+        if repaint {
+            ctx.request_repaint_after(PREVIEW_TICK);
         }
     }
 
@@ -739,6 +992,43 @@ impl Preview {
 
     fn reap_video_workers(&mut self) {
         self.retired_video.retain(|worker| !worker.is_finished());
+    }
+
+    pub(super) fn stop_scrub_audio(&mut self) {
+        if let Some(audio) = &self.scrub_audio {
+            audio.stop();
+        }
+    }
+
+    fn cache_frame(&mut self, key: PreviewCacheKey, pixels: &[u8]) {
+        self.cached_frames.retain(|frame| frame.key != key);
+        self.cached_frames.push_front(CachedFrame {
+            key,
+            pixels: pixels.to_vec(),
+        });
+        self.cached_frames.truncate(PREVIEW_CACHE_CAPACITY);
+    }
+
+    fn publish_texture(
+        &mut self,
+        ctx: &egui::Context,
+        pixels: Vec<u8>,
+        size: [usize; 2],
+        composition_size: (u32, u32),
+        excluded_overlay: Option<u64>,
+    ) {
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+        if let Some(texture) = &mut self.texture {
+            texture.handle.set(image, egui::TextureOptions::LINEAR);
+            texture.composition_size = composition_size;
+            texture.excluded_overlay = excluded_overlay;
+        } else {
+            self.texture = Some(PreviewTexture {
+                handle: ctx.load_texture("editor-preview", image, egui::TextureOptions::LINEAR),
+                composition_size,
+                excluded_overlay,
+            });
+        }
     }
 }
 
@@ -828,6 +1118,7 @@ struct PreviewSession {
     first_frame_at: Option<Instant>,
     frames: Option<Receiver<VideoFrame>>,
     pending: Option<VideoFrame>,
+    cache_key: Option<PreviewCacheKey>,
     errors_tx: mpsc::Sender<PreviewError>,
     errors: Receiver<PreviewError>,
 }
@@ -858,6 +1149,7 @@ impl PreviewSession {
             first_frame_at: (!has_video).then(Instant::now),
             frames: None,
             pending: None,
+            cache_key: None,
             errors_tx,
             errors,
         }
@@ -981,6 +1273,12 @@ struct VideoDecode {
     composition_size: (u32, u32),
     timeline_from: u64,
     timeline_duration: u64,
+    speed_milli: u16,
+    reverse: bool,
+    timeline_start: u64,
+    timeline_duration_us: u64,
+    fade_in_us: u64,
+    fade_out_us: u64,
     overlays: Overlays,
     backdrop: super::background::BackgroundSettings,
     cursor: Option<super::cursor_effect::CursorTelemetry>,
@@ -1066,11 +1364,27 @@ impl VideoDecode {
             let duration = seconds(self.span.duration());
             command.args(["-t", &duration]);
             let fps = format!("fps={VIDEO_FPS}:start_time=0:eof_action=pass");
-            if (has_overlays || self.backdrop.enabled()) && self.path.is_some() {
-                format!("{fps},tpad=stop_mode=clone:stop_duration={duration}")
-            } else {
-                fps
+            let mut filter = fps;
+            if self.reverse {
+                filter.push_str(",reverse");
             }
+            if self.speed_milli != 1000 {
+                filter.push_str(&format!(",setpts=PTS/{:.3}", f32::from(self.speed_milli) / 1000.0));
+            }
+            append_video_fades(
+                &mut filter,
+                self.timeline_from,
+                self.timeline_start,
+                self.timeline_duration_us,
+                self.fade_in_us,
+                self.fade_out_us,
+            );
+            if (has_overlays || self.backdrop.enabled() || self.speed_milli != 1000)
+                && self.path.is_some()
+            {
+                filter.push_str(&format!(",tpad=stop_mode=clone:stop_duration={duration}"));
+            }
+            filter
         } else {
             command.args(["-frames:v", "1"]);
             String::new()

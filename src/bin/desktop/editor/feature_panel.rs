@@ -19,15 +19,17 @@ pub(super) enum FeatureTab {
     Captions,
     Text,
     Background,
+    Transitions,
 }
 
 impl FeatureTab {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Materials,
         Self::Audio,
         Self::Captions,
         Self::Text,
         Self::Background,
+        Self::Transitions,
     ];
 
     fn label(self, locale: Locale) -> &'static str {
@@ -37,6 +39,7 @@ impl FeatureTab {
             Self::Captions => locale.text(key::CAPTIONS),
             Self::Text => locale.text(key::TEXT),
             Self::Background => locale.text(key::BACKGROUND),
+            Self::Transitions => locale.text(key::TRANSITIONS),
         }
     }
 
@@ -47,6 +50,7 @@ impl FeatureTab {
             Self::Captions => Icon::Captions,
             Self::Text => Icon::Text,
             Self::Background => Icon::Fit,
+            Self::Transitions => Icon::Trim,
         }
     }
 }

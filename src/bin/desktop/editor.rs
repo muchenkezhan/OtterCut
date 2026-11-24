@@ -63,6 +63,8 @@ mod media;
 mod narration_capture;
 #[path = "editor/player.rs"]
 mod player;
+#[path = "editor/proxy_cache.rs"]
+mod proxy_cache;
 #[path = "editor/preview_viewport.rs"]
 mod preview_viewport;
 #[path = "editor/project.rs"]
@@ -75,6 +77,8 @@ mod speech;
 mod subtitle_canvas;
 #[path = "editor/text_panel.rs"]
 mod text_panel;
+#[path = "editor/transition_panel.rs"]
+mod transition_panel;
 #[path = "editor/thumbnails.rs"]
 mod thumbnails;
 #[path = "editor/timeline_view.rs"]

@@ -74,6 +74,17 @@ impl Track {
 
 /// A contiguous slice of media or generated text. All times are in microseconds.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TransitionSpec {
+    pub id: String,
+    pub duration_us: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+}
+
+/// A contiguous slice of media or generated text. All times are in microseconds.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Clip {
     pub id: u64,
     pub path: PathBuf,
@@ -83,12 +94,38 @@ pub struct Clip {
     pub start: u64,
     #[serde(default, skip_serializing_if = "is_default_volume")]
     pub volume_db_tenths: i16,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fade_in_us: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fade_out_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_in: Option<TransitionSpec>,
+    #[serde(default = "default_speed_milli", skip_serializing_if = "is_normal_speed")]
+    pub speed_milli: u16,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub timeline_duration_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<OverlayText>,
 }
 
 fn is_default_volume(volume: &i16) -> bool {
     *volume == 0
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn default_speed_milli() -> u16 {
+    1000
+}
+
+fn is_normal_speed(value: &u16) -> bool {
+    *value == 1000
 }
 
 impl Clip {
@@ -104,17 +141,55 @@ impl Clip {
             source_end: duration,
             start,
             volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
             text: None,
         }
     }
 
     pub fn duration(&self) -> u64 {
-        self.source_end.saturating_sub(self.source_start)
+        if self.timeline_duration_us > 0 {
+            return self.timeline_duration_us;
+        }
+        self.source_end
+            .saturating_sub(self.source_start)
+            .saturating_mul(1000)
+            .checked_div(u64::from(self.speed_milli.max(1)))
+            .unwrap_or(u64::MAX)
+    }
+
+    pub fn set_speed(&mut self, speed_milli: u16) {
+        self.speed_milli = speed_milli.clamp(500, 2000);
+        self.timeline_duration_us = if self.speed_milli == 1000 {
+            0
+        } else {
+            self.source_end
+                .saturating_sub(self.source_start)
+                .saturating_mul(1000)
+                .checked_div(u64::from(self.speed_milli))
+                .unwrap_or(1)
+                .max(1)
+        };
     }
 
     /// The end position is exclusive.
     pub fn end(&self) -> u64 {
         self.start.saturating_add(self.duration())
+    }
+
+    pub fn source_time_at(&self, timeline_time: u64) -> u64 {
+        let offset = timeline_time.saturating_sub(self.start);
+        self.source_start.saturating_add(
+            offset
+                .saturating_mul(u64::from(self.speed_milli.max(1)))
+                .checked_div(1000)
+                .unwrap_or(u64::MAX),
+        )
     }
 
     /// Maximum amount of time by which the in-point can be extended.
@@ -123,6 +198,9 @@ impl Clip {
             self.start
         } else {
             self.source_start
+                .saturating_mul(1000)
+                .checked_div(u64::from(self.speed_milli.max(1)))
+                .unwrap_or(u64::MAX)
         }
     }
 
@@ -131,7 +209,11 @@ impl Clip {
         if self.text.is_some() {
             u64::MAX - self.end()
         } else {
-            self.media_duration.saturating_sub(self.source_end)
+            self.media_duration
+                .saturating_sub(self.source_end)
+                .saturating_mul(1000)
+                .checked_div(u64::from(self.speed_milli.max(1)))
+                .unwrap_or(u64::MAX)
         }
     }
 
@@ -139,7 +221,14 @@ impl Clip {
         if self.text.is_some() {
             return self.change_text_duration(-delta);
         }
-        self.source_start = shift_source_time(self.source_start, delta)?;
+        let source_delta = delta
+            .saturating_mul(i128::from(self.speed_milli.max(1)))
+            .checked_div(1000)
+            .ok_or(TimelineError::InvalidSourceRange)?;
+        self.source_start = shift_source_time(self.source_start, source_delta)?;
+        if self.timeline_duration_us > 0 {
+            self.timeline_duration_us = shift_source_time(self.timeline_duration_us, -delta)?;
+        }
         Ok(())
     }
 
@@ -147,7 +236,14 @@ impl Clip {
         if self.text.is_some() {
             return self.change_text_duration(delta);
         }
-        self.source_end = shift_source_time(self.source_end, delta)?;
+        let source_delta = delta
+            .saturating_mul(i128::from(self.speed_milli.max(1)))
+            .checked_div(1000)
+            .ok_or(TimelineError::InvalidSourceRange)?;
+        self.source_end = shift_source_time(self.source_end, source_delta)?;
+        if self.timeline_duration_us > 0 {
+            self.timeline_duration_us = shift_source_time(self.timeline_duration_us, delta)?;
+        }
         Ok(())
     }
 
@@ -173,6 +269,8 @@ pub enum TimelineError {
     InvalidTextSize,
     InvalidTextPosition,
     InvalidVolume,
+    InvalidSpeed,
+    InvalidLink,
     InvalidSourceRange,
     InvalidSplitPoint,
     Overlap,
@@ -208,6 +306,8 @@ impl fmt::Display for TimelineError {
                 Clip::MIN_VOLUME_DB_TENTHS / 10,
                 Clip::MAX_VOLUME_DB_TENTHS / 10
             ),
+            Self::InvalidSpeed => f.write_str("片段速度须在 0.5x 到 2x 之间"),
+            Self::InvalidLink => f.write_str("至少选择两个片段才能建立链接"),
             Self::InvalidSourceRange => f.write_str("剪辑超出素材范围，或片段时长为零"),
             Self::InvalidSplitPoint => f.write_str("分割点必须位于片段内部"),
             Self::Overlap => f.write_str("剪辑会使两个片段重叠"),
@@ -442,6 +542,122 @@ impl Timeline {
         })
     }
 
+    pub fn set_clip_fade_in(&mut self, id: u64, duration: u64) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            clips[index].fade_in_us = duration.min(clips[index].duration());
+            Ok(())
+        })
+    }
+
+    pub fn set_clip_fade_out(&mut self, id: u64, duration: u64) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            clips[index].fade_out_us = duration.min(clips[index].duration());
+            Ok(())
+        })
+    }
+
+    pub fn set_clip_transition_in(
+        &mut self,
+        id: u64,
+        transition: Option<TransitionSpec>,
+    ) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            clips[index].transition_in = transition;
+            Ok(())
+        })
+    }
+
+    pub fn set_clip_transition_duration(
+        &mut self,
+        id: u64,
+        duration_us: u64,
+    ) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            let clip_duration = clips[index].duration();
+            let Some(role) = clips[index]
+                .transition_in
+                .as_ref()
+                .map(|transition| transition.role.as_str())
+            else {
+                return Err(TimelineError::ClipNotFound(id));
+            };
+            let minimum = 50_000.min(clip_duration);
+            let max_duration = if role == "转场" {
+                clips
+                    .get(index.checked_sub(1).unwrap_or(index))
+                    .filter(|_| index > 0)
+                    .map(|previous| previous.duration().min(clip_duration).saturating_mul(2))
+                    .unwrap_or(clip_duration)
+            } else {
+                clip_duration
+            };
+            let clip = &mut clips[index];
+            let transition = clip.transition_in.as_mut().expect("transition checked above");
+            transition.duration_us = duration_us.clamp(minimum, max_duration.max(minimum));
+            Ok(())
+        })
+    }
+
+    pub fn set_clip_speed(&mut self, id: u64, speed_milli: u16) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            let old_end = clips[index].end();
+            clips[index].set_speed(speed_milli);
+            let delta = i128::from(clips[index].end()) - i128::from(old_end);
+            shift_clips(&mut clips[index + 1..], delta)
+        })
+    }
+
+    pub fn set_clip_reverse(&mut self, id: u64, reverse: bool) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        self.edit_track(track, |clips, _| {
+            clips[index].reverse = reverse;
+            Ok(())
+        })
+    }
+
+    pub fn link_clips(&mut self, ids: &[u64]) -> Result<(), TimelineError> {
+        if ids.len() < 2 {
+            return Err(TimelineError::InvalidLink);
+        }
+        let group_id = *ids.iter().min().ok_or(TimelineError::InvalidLink)?;
+        for id in ids {
+            if self.clip(*id).is_none() {
+                return Err(TimelineError::ClipNotFound(*id));
+            }
+        }
+        self.edit(|tracks, _| {
+            for track in tracks {
+                for clip in &mut track.clips {
+                    if ids.contains(&clip.id) {
+                        clip.group_id = Some(group_id);
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn unlink_clips(&mut self, ids: &[u64]) -> Result<(), TimelineError> {
+        if ids.is_empty() {
+            return Err(TimelineError::InvalidLink);
+        }
+        self.edit(|tracks, _| {
+            for track in tracks {
+                for clip in &mut track.clips {
+                    if ids.contains(&clip.id) {
+                        clip.group_id = None;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
     pub fn append(&mut self, path: PathBuf, duration: u64) -> Result<u64, TimelineError> {
         self.insert_media(
             path,
@@ -527,12 +743,23 @@ impl Timeline {
 
     /// Moves a clip to a free position, preserving all other clip positions.
     pub fn move_clip(&mut self, id: u64, start: u64) -> Result<(), TimelineError> {
-        let (track, index) = self.locate_clip(id)?;
-        self.edit_track(track, |clips, _| {
-            clips[index].start = start;
-            clips.sort_unstable_by_key(|clip| clip.start);
-            Ok(())
-        })
+        let clip = self.clip(id).ok_or(TimelineError::ClipNotFound(id))?;
+        let delta = i128::from(start) - i128::from(clip.start);
+        let ids = self.linked_clip_ids(id);
+        self.move_clips(&ids, i64::try_from(delta).map_err(|_| TimelineError::TimeOutOfBounds)?)
+    }
+
+    pub fn linked_clip_ids(&self, id: u64) -> Vec<u64> {
+        let Some(clip) = self.clip(id) else {
+            return Vec::new();
+        };
+        let Some(group_id) = clip.group_id else {
+            return vec![id];
+        };
+        self.all_clips()
+            .filter(|candidate| candidate.group_id == Some(group_id))
+            .map(|candidate| candidate.id)
+            .collect()
     }
 
     /// Moves selected clips together, preserving their tracks and relative positions.
@@ -914,6 +1141,9 @@ fn validate(tracks: &[Track]) -> Result<(), TimelineError> {
             {
                 return Err(TimelineError::InvalidVolume);
             }
+            if !(500..=2000).contains(&clip.speed_milli) {
+                return Err(TimelineError::InvalidSpeed);
+            }
             match (track.kind.is_overlay(), &clip.text) {
                 (true, Some(text))
                     if clip.path.as_os_str().is_empty() && clip.volume_db_tenths == 0 =>
@@ -925,6 +1155,9 @@ fn validate(tracks: &[Track]) -> Result<(), TimelineError> {
             }
             if clip.start < previous_end {
                 return Err(TimelineError::Overlap);
+            }
+            if clip.fade_in_us > clip.duration() || clip.fade_out_us > clip.duration() {
+                return Err(TimelineError::InvalidSourceRange);
             }
             previous_end = clip
                 .start
@@ -1000,6 +1233,8 @@ mod tests {
             source_end,
             start,
             volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
             text: None,
         }
     }
@@ -1091,6 +1326,44 @@ mod tests {
         assert_eq!(timeline.clips()[1], clip(2, 18, 27, 43));
         assert_eq!(timeline.clips()[2], clip(3, 34, 34, 60));
         assert_eq!(timeline.duration(), 60);
+    }
+
+    #[test]
+    fn speed_changes_timeline_duration_and_ripples_following_clips() {
+        let mut timeline = contiguous_timeline();
+        timeline.set_clip_speed(2, 2000).unwrap();
+        assert_eq!(timeline.clip(2).unwrap().duration(), 10);
+        assert_eq!(timeline.clip(2).unwrap().source_start, 30);
+        assert_eq!(timeline.clip(2).unwrap().source_end, 50);
+        assert_eq!(timeline.clip(3).unwrap().start, 30);
+        timeline.set_clip_reverse(2, true).unwrap();
+        assert!(timeline.clip(2).unwrap().reverse);
+    }
+
+    #[test]
+    fn linked_clips_move_together_and_can_be_unlinked() {
+        let mut timeline = Timeline::from_tracks(vec![
+            Track {
+                id: PRIMARY_VIDEO,
+                kind: TrackKind::Video,
+                enabled: true,
+                clips: vec![clip(1, 0, 0, 20)],
+            },
+            Track {
+                id: PRIMARY_AUDIO,
+                kind: TrackKind::Audio,
+                enabled: true,
+                clips: vec![clip(2, 0, 0, 20)],
+            },
+        ])
+        .unwrap();
+        timeline.link_clips(&[1, 2]).unwrap();
+        timeline.move_clip(1, 100).unwrap();
+        assert_eq!(timeline.clip(1).unwrap().start, 100);
+        assert_eq!(timeline.clip(2).unwrap().start, 100);
+        timeline.unlink_clips(&[1, 2]).unwrap();
+        timeline.move_clip(1, 140).unwrap();
+        assert_eq!(timeline.clip(2).unwrap().start, 100);
     }
 
     #[test]

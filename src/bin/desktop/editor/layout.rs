@@ -1,5 +1,6 @@
 use eframe::egui::{
-    self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, UiBuilder, pos2, vec2,
+    self, Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, UiBuilder, pos2,
+    vec2,
 };
 use takeseam::PRODUCT_NAME;
 
@@ -17,6 +18,7 @@ use super::{window_chrome, window_frame};
 mod canvas_ratio;
 
 const CONTROL_ROW_HEIGHT: f32 = 32.0;
+const PREVIEW_HEADER_HEIGHT: f32 = 26.0;
 const CONTROL_GAP: f32 = 6.0;
 const SEEK_HEIGHT: f32 = 16.0;
 const MIN_SEEK_WIDTH: f32 = 24.0;
@@ -196,8 +198,16 @@ pub(super) fn status(ui: &mut egui::Ui, text: &str, warning: bool, loading: bool
 pub(super) struct TransportInput {
     pub toggle: bool,
     pub seek: Option<u64>,
+    pub seek_finished: bool,
+    pub jump: Option<u64>,
+    pub step: Option<i64>,
     pub quality: Option<PreviewQuality>,
     pub canvas_format: Option<CanvasFormat>,
+}
+
+struct SeekInteraction {
+    position: u64,
+    finished: bool,
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -206,6 +216,7 @@ pub(super) fn monitor(
     viewport: &mut PreviewViewport,
     texture: Option<&egui::TextureHandle>,
     composition_size: Option<(u32, u32)>,
+    title: &str,
     empty: &str,
     position: u64,
     duration: u64,
@@ -224,8 +235,53 @@ pub(super) fn monitor(
             1.0
         };
         let transport_height = rows * (CONTROL_ROW_HEIGHT + ui.spacing().item_spacing.y);
+        let (header, _) = ui.allocate_exact_size(
+            vec2(available.x, PREVIEW_HEADER_HEIGHT),
+            Sense::hover(),
+        );
+        let header_painter = ui.painter_at(header);
+        header_painter.rect_filled(header, 0, colors.surface);
+        header_painter.text(
+            pos2(header.left() + 10.0, header.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            FontId::proportional(11.0),
+            colors.text,
+        );
+        let output_size = composition_size
+            .or_else(|| canvas_format.dimensions())
+            .unwrap_or((1280, 720));
+        header_painter.text(
+            pos2(header.right() - 10.0, header.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{} × {} · 30 fps", output_size.0, output_size.1),
+            FontId::monospace(10.0),
+            colors.muted,
+        );
+        header_painter.line_segment(
+            [pos2(header.left(), header.bottom()), pos2(header.right(), header.bottom())],
+            Stroke::new(1.0, colors.border),
+        );
+        let header_response = ui.interact(
+            header,
+            ui.id().with("preview-header-context"),
+            Sense::click(),
+        );
+        header_response.context_menu(|ui| {
+            if ui.button("适应画布").clicked() {
+                viewport.reset();
+                ui.close();
+            }
+            if ui.button("重置预览位置").clicked() {
+                viewport.reset();
+                ui.close();
+            }
+        });
         let (bounds, _) = ui.allocate_exact_size(
-            vec2(available.x, (available.y - transport_height).max(0.0)),
+            vec2(
+                available.x,
+                (available.y - PREVIEW_HEADER_HEIGHT - transport_height).max(0.0),
+            ),
             Sense::hover(),
         );
         let painter = ui.painter().with_clip_rect(bounds);
@@ -344,7 +400,12 @@ fn update_preview_viewport(
     }
 }
 
-fn preview_seek(ui: &mut egui::Ui, position: u64, duration: u64, colors: Palette) -> Option<u64> {
+fn preview_seek(
+    ui: &mut egui::Ui,
+    position: u64,
+    duration: u64,
+    colors: Palette,
+) -> Option<SeekInteraction> {
     let width = ui.available_width().floor();
     let enabled = duration > 0;
     let mut value = position.min(duration);
@@ -375,7 +436,17 @@ fn preview_seek(ui: &mut egui::Ui, position: u64, duration: u64, colors: Palette
         let label = Locale::from_context(ui.ctx()).text(key::PREVIEW_PROGRESS);
         ui.ctx()
             .accesskit_node_builder(response.id, |node| node.set_label(label));
-        response.on_hover_text(label).changed().then_some(value)
+        let finished = response.drag_stopped() || response.clicked();
+        (response.is_pointer_button_down_on()
+            || response.dragged()
+            || response.changed()
+            || finished)
+            .then_some(
+            SeekInteraction {
+                position: value,
+                finished,
+            },
+        )
     })
     .inner
 }
@@ -456,19 +527,23 @@ fn transport_row(
     } else {
         zoom_bounds.left() - CONTROL_GAP
     };
-    let latest_play_center = seek_right - MIN_SEEK_WIDTH - CONTROL_GAP - CONTROL_ROW_HEIGHT * 0.5;
+    let transport_width = CONTROL_ROW_HEIGHT * 5.0 + CONTROL_GAP * 4.0;
+    let latest_play_center =
+        seek_right - MIN_SEEK_WIDTH - CONTROL_GAP - transport_width * 0.5;
     let play_center = row
         .center()
         .x
         .min(latest_play_center)
-        .max(row.left() + CONTROL_ROW_HEIGHT * 0.5);
+        .max(row.left() + transport_width * 0.5);
     let play = Rect::from_center_size(
         pos2(play_center, row.center().y),
         vec2(CONTROL_ROW_HEIGHT, CONTROL_ROW_HEIGHT),
     );
+    let transport_left = play_center - transport_width * 0.5;
+    let transport_right = play_center + transport_width * 0.5;
     let timecode = Rect::from_min_max(
         row.min,
-        pos2((play.left() - CONTROL_GAP).max(row.left()), row.bottom()),
+        pos2((transport_left - CONTROL_GAP).max(row.left()), row.bottom()),
     );
     let mut time_ui = ui.new_child(
         UiBuilder::new()
@@ -501,8 +576,67 @@ fn transport_row(
     } else {
         (Icon::Play, locale.text(key::PLAY))
     };
+    let mut jump = None;
+    let mut step = None;
+    let control = |ui: &mut egui::Ui, center: f32, glyph: &str, label: &str, enabled: bool| {
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.put(
+                Rect::from_center_size(
+                    pos2(center, row.center().y),
+                    vec2(CONTROL_ROW_HEIGHT - 4.0, CONTROL_ROW_HEIGHT - 4.0),
+                ),
+                egui::Button::new(RichText::new(glyph).size(13.0)),
+            )
+        })
+        .inner
+        .on_hover_text(label)
+    };
+    if control(
+        ui,
+        play_center - CONTROL_ROW_HEIGHT * 2.0 - CONTROL_GAP * 2.0,
+        "⏮",
+        "跳到开头",
+        position > 0,
+    )
+    .clicked()
+    {
+        jump = Some(0);
+    }
+    if control(
+        ui,
+        play_center - CONTROL_ROW_HEIGHT - CONTROL_GAP,
+        "◀",
+        "上一帧",
+        position > 0,
+    )
+    .clicked()
+    {
+        step = Some(-1);
+    }
     let toggle = icon_button(&mut play_ui, icon, label, duration > 0, ButtonStyle::Quiet).clicked();
-    let seek_width = (seek_right - play.right() - CONTROL_GAP).clamp(0.0, 192.0);
+    if control(
+        ui,
+        play_center + CONTROL_ROW_HEIGHT + CONTROL_GAP,
+        "▶",
+        "下一帧",
+        position < duration,
+    )
+    .clicked()
+    {
+        step = Some(1);
+    }
+    if control(
+        ui,
+        play_center + CONTROL_ROW_HEIGHT * 2.0 + CONTROL_GAP * 2.0,
+        "⏭",
+        "跳到结尾",
+        position < duration,
+    )
+    .clicked()
+    {
+        jump = Some(duration);
+    }
+    let seek_width = (seek_right - transport_right - CONTROL_GAP).clamp(0.0, 192.0);
     let seeker = Rect::from_min_size(
         pos2(seek_right - seek_width, row.top()),
         vec2(seek_width, row.height()),
@@ -548,7 +682,10 @@ fn transport_row(
     let canvas_format =
         canvas_ratio::picker(&mut ratio_ui, ratio_width, canvas_format, composition_size);
     TransportInput {
-        seek,
+        seek: seek.as_ref().map(|input| input.position),
+        seek_finished: seek.is_some_and(|input| input.finished),
+        jump,
+        step,
         toggle,
         quality,
         canvas_format,
@@ -594,6 +731,7 @@ mod tests {
                         view,
                         Some(&texture),
                         Some((640, 360)),
+                        "预览",
                         "",
                         0,
                         3_000_000,
@@ -736,6 +874,7 @@ mod tests {
                                 &mut PreviewViewport::default(),
                                 None,
                                 None,
+                                "预览",
                                 "",
                                 0,
                                 12_000_000,

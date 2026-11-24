@@ -31,12 +31,16 @@ pub(super) enum Action {
     Copy(u64),
     Delete(u64, bool),
     ResetVolume(u64),
+    LinkSelection,
+    UnlinkSelection,
     Seek(u64),
     Paste(PasteTarget, u64),
     InsertTrack(TrackKind, Option<TrackId>),
     InsertTrackAfter(TrackKind, TrackId),
     RemoveTrack(TrackId),
     SetOutput(TrackId, bool),
+    AddMarker(u64),
+    RemoveMarker(u64),
     RecognizeAudio(TrackId),
 }
 
@@ -101,6 +105,7 @@ impl ContextMenu {
         timeline: &Timeline,
         clipboard: Option<&ClipboardClip>,
         selection: &[u64],
+        markers: &[u64],
     ) -> Option<Action> {
         let mut popup = egui::Popup::menu(anchor)
             .id(popup_id(ui))
@@ -111,7 +116,7 @@ impl ContextMenu {
             popup = popup.close_behavior(egui::PopupCloseBehavior::IgnoreClicks);
         }
         popup
-            .show(|ui| self.target.menu(ui, timeline, clipboard, selection))
+            .show(|ui| self.target.menu(ui, timeline, clipboard, selection, markers))
             .and_then(|response| response.inner)
     }
 }
@@ -155,6 +160,7 @@ impl Target {
         timeline: &Timeline,
         clipboard: Option<&ClipboardClip>,
         selection: &[u64],
+        markers: &[u64],
     ) -> Option<Action> {
         layout::compact_menu(ui);
         let mut chosen = None;
@@ -186,6 +192,21 @@ impl Target {
                     Action::Paste(PasteTarget::Track(track.id), at),
                 );
                 let multiple = selection.len() > 1 && selection.contains(&id);
+                if multiple {
+                    item(
+                        if clip.group_id.is_some() {
+                            "取消链接选中片段"
+                        } else {
+                            "链接选中片段"
+                        },
+                        true,
+                        if clip.group_id.is_some() {
+                            Action::UnlinkSelection
+                        } else {
+                            Action::LinkSelection
+                        },
+                    );
+                }
                 item(
                     if multiple {
                         "删除选中片段"
@@ -248,6 +269,12 @@ impl Target {
             }
             Self::Ruler(at) => {
                 item("在此定位播放头", !timeline.is_empty(), Action::Seek(at));
+                item("添加时间线标记", true, Action::AddMarker(at));
+                if let Some(marker) = markers.iter().min_by_key(|marker| marker.abs_diff(at))
+                    .filter(|marker| marker.abs_diff(at) <= 250_000)
+                {
+                    item("删除附近标记", true, Action::RemoveMarker(*marker));
+                }
                 item(
                     "在此插入粘贴",
                     can_paste,
@@ -313,6 +340,8 @@ impl TimelineView {
             }
             Action::Delete(id, ripple) => timeline.remove(id, ripple)?,
             Action::ResetVolume(id) => timeline.set_clip_volume(id, 0)?,
+            Action::LinkSelection => timeline.link_clips(self.marquee.ids())?,
+            Action::UnlinkSelection => timeline.unlink_clips(self.marquee.ids())?,
             Action::Seek(at) => *playhead = at.min(timeline.duration()),
             Action::Paste(target, at) => {
                 if let Some(clip) = &self.clipboard {
@@ -361,6 +390,8 @@ impl TimelineView {
                 }
             }
             Action::SetOutput(id, enabled) => timeline.set_track_enabled(id, enabled)?,
+            Action::AddMarker(at) => self.marker_action = Some(super::MarkerAction::Add(at)),
+            Action::RemoveMarker(at) => self.marker_action = Some(super::MarkerAction::Remove(at)),
             Action::RecognizeAudio(id) => {
                 self.recognize_audio_track = Some(id);
             }

@@ -10,6 +10,10 @@ default-run = "ottercut"
 name = "ottercut"
 path = "src/bin/takeseam-desktop.rs"
 
+[[bin]]
+name = "ottercut-mcp"
+path = "src/bin/ottercut-mcp.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 

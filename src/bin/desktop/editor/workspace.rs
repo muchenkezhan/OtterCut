@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -7,6 +7,7 @@ use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::PRODUCT_NAME;
 use takeseam::editor_timeline::{
     OverlayText, PRIMARY_AUDIO, PRIMARY_VIDEO, TextStyle, Timeline, TrackId, TrackKind,
+    TransitionSpec,
 };
 
 use super::asset_cards::{self, MaterialAction};
@@ -22,8 +23,9 @@ use super::file_menu::{self, FileAction};
 use super::inspector_details;
 use super::layout;
 use super::library::{AUDIO_EXTENSIONS, Library, filename};
-use super::media::{MediaInfo, MediaTools};
+use super::media::{MediaInfo, MediaTools, PreviewQuality};
 use super::player::{Player, Span};
+use super::proxy_cache::ProxyCache;
 use super::preview_viewport::PreviewViewport;
 use super::project;
 use super::speech::{SpeechCue, SpeechJob};
@@ -31,6 +33,7 @@ use super::subtitle_canvas::SubtitleCanvas;
 use super::text_panel::TextInspector;
 use super::thumbnails::Thumbnails;
 use super::timeline_view::{TimelineView, TrackDestination};
+use super::transition_panel;
 #[cfg(windows)]
 use super::window_frame;
 use super::{dock_presets, dock_view};
@@ -38,6 +41,8 @@ use crate::open;
 use crate::ui_icons::{ButtonStyle, Icon, icon_button};
 use crate::ui_theme;
 use takeseam::i18n::{Language, Locale, key};
+
+const PREVIEW_SCRUB_STEP_US: u64 = 100_000;
 
 #[cfg(test)]
 #[path = "workspace/drag_drop_tests.rs"]
@@ -54,11 +59,14 @@ pub(super) struct Workspace {
     tools_error: Option<String>,
     library: Library,
     feature_tab: FeatureTab,
+    transition_panel: transition_panel::State,
     narration: narration::Narration,
     text_inspector: TextInspector,
     subtitle_canvas: SubtitleCanvas,
     material_info: Option<PathBuf>,
     thumbnails: Thumbnails,
+    preview_thumbnails: Thumbnails,
+    proxy_cache: ProxyCache,
     material_drag: asset_cards::MaterialDrag,
     timeline: Timeline,
     timeline_view: TimelineView,
@@ -71,6 +79,8 @@ pub(super) struct Workspace {
     saved_background: BackgroundSettings,
     cursor_effect: CursorEffect,
     saved_cursor_effect: CursorEffect,
+    markers: Vec<u64>,
+    saved_markers: Vec<u64>,
     position: u64,
     player: Player,
     volume_preview: Option<(u64, i16)>,
@@ -112,6 +122,8 @@ impl Workspace {
         };
         let library = Library::new(directory, tools.as_ref(), ctx);
         let thumbnails = Thumbnails::new(tools.clone(), ctx);
+        let preview_thumbnails = Thumbnails::preview(tools.clone(), ctx);
+        let proxy_cache = ProxyCache::new(tools.clone(), ctx);
         Self {
             logo,
             docking: Some(if cfg!(test) {
@@ -124,11 +136,14 @@ impl Workspace {
             tools_error,
             library,
             feature_tab: FeatureTab::default(),
+            transition_panel: transition_panel::State::default(),
             narration: narration::Narration::default(),
             text_inspector: TextInspector::default(),
             subtitle_canvas: SubtitleCanvas::default(),
             material_info: None,
             thumbnails,
+            preview_thumbnails,
+            proxy_cache,
             material_drag: asset_cards::MaterialDrag::default(),
             timeline: Timeline::from_tracks(Vec::new()).expect("empty timeline is valid"),
             selected_clip: None,
@@ -140,6 +155,8 @@ impl Workspace {
             saved_background: BackgroundSettings::default(),
             cursor_effect: CursorEffect::default_for(1),
             saved_cursor_effect: CursorEffect::default_for(1),
+            markers: Vec::new(),
+            saved_markers: Vec::new(),
             position: 0,
             player: Player::default(),
             volume_preview: None,
@@ -197,6 +214,7 @@ impl Workspace {
             || self.canvas_format != self.saved_canvas_format
             || self.background != self.saved_background
             || self.cursor_effect != self.saved_cursor_effect
+            || self.markers != self.saved_markers
     }
 
     fn title(&self) -> String {
@@ -349,9 +367,14 @@ impl Workspace {
 
     fn sync_preview(&mut self, ctx: &egui::Context) {
         self.media_error = None;
+        if self.player.is_scrubbing() {
+            return;
+        }
+        self.prepare_current_proxy();
         if self.cursor_effect.end_us == 1 && self.duration() > 1 {
             self.cursor_effect.end_us = self.duration();
         }
+        let proxy_path = self.preview_proxy_path();
         let span = if self.timeline.is_empty() {
             let asset = self.library.selected_path().map(Path::to_owned);
             if let Some(path) = asset {
@@ -399,7 +422,8 @@ impl Workspace {
             ctx,
             self.tools.as_ref(),
             span.map(|span| {
-                span.with_canvas_format(self.canvas_format)
+                span.with_video_decode_path(proxy_path.clone())
+                    .with_canvas_format(self.canvas_format)
                     .with_background(&self.background)
                     .with_cursor_effect(&self.cursor_effect)
             }),
@@ -437,7 +461,7 @@ impl Workspace {
 
     fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match project::load_with_cursor(&path) {
-            Ok((timeline, position, canvas_format, background, cursor_effect)) => {
+            Ok((timeline, position, canvas_format, background, cursor_effect, markers)) => {
                 for clip in timeline.all_clips().filter(|clip| clip.text.is_none()) {
                     self.library.insert(clip.path.clone(), false);
                 }
@@ -450,6 +474,8 @@ impl Workspace {
                 self.background = background;
                 self.saved_cursor_effect = cursor_effect.clone();
                 self.cursor_effect = cursor_effect;
+                self.saved_markers = markers.clone();
+                self.markers = markers;
                 self.position = position;
                 self.selected_clip = None;
                 self.text_inspector = TextInspector::default();
@@ -459,6 +485,7 @@ impl Workspace {
                 self.player.playing = false;
                 self.player.reset();
                 self.project = Some(path);
+                self.proxy_cache.set_project(self.project.as_deref());
                 self.home = false;
                 self.show_notice("工程已打开", false);
             }
@@ -488,6 +515,7 @@ impl Workspace {
             self.canvas_format,
             &self.background,
             &self.cursor_effect,
+            &self.markers,
         ) {
             Ok(()) => {
                 self.project = Some(path);
@@ -495,6 +523,7 @@ impl Workspace {
                 self.saved_canvas_format = self.canvas_format;
                 self.saved_background.clone_from(&self.background);
                 self.saved_cursor_effect.clone_from(&self.cursor_effect);
+                self.saved_markers.clone_from(&self.markers);
                 self.show_notice("工程已保存", false);
             }
             Err(error) => self.show_notice(format!("{error:#}"), true),
@@ -1031,6 +1060,46 @@ impl Workspace {
                     ui.ctx().request_repaint();
                 }
             }
+            FeatureTab::Transitions => self.transition_tools(ui),
+        }
+    }
+
+    fn transition_tools(&mut self, ui: &mut egui::Ui) {
+        self.material_drag.hide(ui.ctx());
+        if let Some(choice) = self.transition_panel.show(ui, self.selected_clip) {
+            if let Some(id) = self.selected_clip {
+                let _ = self.timeline.set_clip_transition_in(
+                    id,
+                    Some(TransitionSpec {
+                        id: choice.id.to_owned(),
+                        duration_us: 300_000,
+                        name: choice.name.to_owned(),
+                        role: choice.role.label().to_owned(),
+                    }),
+                );
+                match (choice.role, choice.name) {
+                    (super::transition_panel::TransitionRole::Entrance, _) => {
+                        let _ = self.timeline.set_clip_fade_in(id, 300_000);
+                    }
+                    (super::transition_panel::TransitionRole::Exit, _) => {
+                        let _ = self.timeline.set_clip_fade_out(id, 300_000);
+                    }
+                    (_, "黑场淡入") => {
+                        let _ = self.timeline.set_clip_fade_in(id, 300_000);
+                    }
+                    (_, "黑场淡出") => {
+                        let _ = self.timeline.set_clip_fade_out(id, 300_000);
+                    }
+                    (_, "黑场淡入淡出") => {
+                        let _ = self.timeline.set_clip_fade_in(id, 300_000);
+                        let _ = self.timeline.set_clip_fade_out(id, 300_000);
+                    }
+                    _ => {}
+                }
+                self.show_notice(format!("已选择转场：{}", choice.name), false);
+            } else {
+                self.show_notice("请先选择时间线片段", true);
+            }
         }
     }
 
@@ -1167,6 +1236,7 @@ impl Workspace {
             self.position
         };
         self.timeline_view.set_cursor_markers(self.cursor_markers());
+        self.timeline_view.set_user_markers(self.markers.clone());
         let input = self.timeline_view.draw(
             ui,
             &mut self.timeline,
@@ -1175,6 +1245,56 @@ impl Workspace {
             add_enabled,
         );
         let recognize_audio_track = input.recognize_audio_track;
+        let mut transition_notice = None;
+        if let Some(action) = input.marker_action {
+            match action {
+                super::timeline_view::MarkerAction::Add(at) => {
+                    self.markers.push(at.min(self.timeline.duration()));
+                    self.markers.sort_unstable();
+                    self.markers.dedup();
+                }
+                super::timeline_view::MarkerAction::Remove(at) => {
+                    if let Some(index) = self.markers.iter().position(|marker| *marker == at) {
+                        self.markers.remove(index);
+                    }
+                }
+            }
+        }
+        if let Some(drop) = input.transition_drop {
+            let metadata_clip = match drop.role {
+                super::transition_panel::TransitionRole::Exit => drop.outgoing,
+                _ => drop.incoming,
+            };
+            let _ = self.timeline.set_clip_transition_in(
+                metadata_clip,
+                Some(TransitionSpec {
+                    id: drop.id.to_owned(),
+                    duration_us: 300_000,
+                    name: drop.name.to_owned(),
+                    role: drop.role.label().to_owned(),
+                }),
+            );
+            match (drop.role, drop.name) {
+                (super::transition_panel::TransitionRole::Entrance, _) => {
+                    let _ = self.timeline.set_clip_fade_in(drop.incoming, 300_000);
+                }
+                (super::transition_panel::TransitionRole::Exit, _) => {
+                    let _ = self.timeline.set_clip_fade_out(drop.outgoing, 300_000);
+                }
+                (_, "黑场淡入") => {
+                    let _ = self.timeline.set_clip_fade_in(drop.incoming, 300_000);
+                }
+                (_, "黑场淡出") => {
+                    let _ = self.timeline.set_clip_fade_out(drop.outgoing, 300_000);
+                }
+                (_, "黑场淡入淡出") => {
+                    let _ = self.timeline.set_clip_fade_in(drop.incoming, 300_000);
+                    let _ = self.timeline.set_clip_fade_out(drop.outgoing, 300_000);
+                }
+                _ => {}
+            }
+            transition_notice = Some(format!("已应用转场：{}", drop.name));
+        }
         let volume_changed = input.volume_changed;
         self.volume_preview = input.volume_preview;
         if let Some(drop) = input.material_drop {
@@ -1202,6 +1322,9 @@ impl Workspace {
         if let Some(error) = input.error {
             self.show_notice(error, true);
         } else if let Some(message) = input.clipboard_feedback {
+            self.show_notice(message, false);
+        }
+        if let Some(message) = transition_notice {
             self.show_notice(message, false);
         }
         if !self.timeline.is_empty() {
@@ -1336,6 +1459,11 @@ impl Workspace {
         } else {
             self.player.blank_message().unwrap_or("正在读取预览…")
         };
+        let preview_placeholder = if self.player.is_scrubbing() || self.player.texture().is_none() {
+            self.preview_placeholder()
+        } else {
+            None
+        };
         let selection = Self::visible_overlay(
             &self.timeline,
             self.selected_clip,
@@ -1346,13 +1474,37 @@ impl Workspace {
             self.subtitle_canvas.cancel();
         }
         let frame_excludes_text = selection.is_some_and(|(id, _)| self.player.texture_excludes(id));
+        let title = self.preview_title();
+        let preview_texture = if self.player.is_scrubbing() {
+            preview_placeholder
+                .as_ref()
+                .map(|(texture, _)| texture.clone())
+                .or_else(|| self.player.texture().cloned())
+        } else {
+            self.player
+                .texture()
+                .cloned()
+                .or_else(|| preview_placeholder.as_ref().map(|(texture, _)| texture.clone()))
+        };
+        let preview_size = self
+            .player
+            .texture_composition_size();
+        let preview_size = if self.player.is_scrubbing() {
+            preview_placeholder
+                .as_ref()
+                .map(|(_, size)| *size)
+                .or(preview_size)
+        } else {
+            preview_size.or_else(|| preview_placeholder.as_ref().map(|(_, size)| *size))
+        };
         let mut canvas_edit = None;
         let subtitle_canvas = &mut self.subtitle_canvas;
         let input = layout::monitor(
             ui,
             &mut self.preview_viewport,
-            self.player.texture(),
-            self.player.texture_composition_size(),
+            preview_texture.as_ref(),
+            preview_size,
+            &title,
             empty,
             self.position,
             duration,
@@ -1383,15 +1535,192 @@ impl Workspace {
             self.subtitle_canvas.cancel();
             ui.ctx().request_repaint();
         }
+        if let Some(jump) = input.jump {
+            self.subtitle_canvas.cancel();
+            self.player.playing = false;
+            self.position = jump.min(duration);
+            self.player.reset();
+        }
+        if let Some(step) = input.step {
+            self.subtitle_canvas.cancel();
+            self.player.playing = false;
+            let delta = step.saturating_mul(33_333);
+            self.position = self.position.saturating_add_signed(delta).min(duration);
+            self.player.reset();
+        }
         if let Some(seek) = input.seek {
             self.subtitle_canvas.cancel();
+            self.player.begin_seek();
             self.position = seek;
-            self.player.reset();
+            if let Some(span) = Span::at(&self.timeline, self.position) {
+                self.player.play_scrub_audio(
+                    self.tools.as_ref(),
+                    span,
+                    &mut self.library,
+                    self.position,
+                );
+            }
+        }
+        if input.seek_finished {
+            self.player.end_seek();
         }
         if input.toggle {
             self.subtitle_canvas.cancel();
             self.player.toggle(&mut self.position, duration);
         }
+    }
+
+    fn preview_placeholder(&mut self) -> Option<(egui::TextureHandle, (u32, u32))> {
+        let (path, timestamp_us, _size) = self.preview_source_at()?;
+        let path = if self.player.is_scrubbing()
+            && let Some(info) = self.library.info(&path)
+        {
+            self.proxy_cache
+                .ensure(&path, info)
+                .unwrap_or(path)
+        } else {
+            path
+        };
+        if let Some(texture) = self
+            .preview_thumbnails
+            .nearest_frame(&path, timestamp_us, 500_000)
+        {
+            return Some((texture.clone(), Self::texture_size(&texture)));
+        }
+        let timestamp_us = timestamp_us / PREVIEW_SCRUB_STEP_US * PREVIEW_SCRUB_STEP_US;
+        if let Some(texture) = self.preview_thumbnails.frame(&path, timestamp_us).cloned() {
+            return Some((texture.clone(), Self::texture_size(&texture)));
+        }
+        if self.player.is_scrubbing() {
+            return None;
+        }
+        if let Some(texture) = self
+            .timeline_view
+            .video_thumbnail_nearest(&path, timestamp_us, 2_000_000)
+        {
+            return Some((texture.clone(), Self::texture_size(&texture)));
+        }
+        self.thumbnails
+            .texture(&path)
+            .cloned()
+            .map(|texture| (texture.clone(), Self::texture_size(&texture)))
+    }
+
+    fn preview_title(&self) -> String {
+        if let Some(track) = self
+            .timeline
+            .tracks()
+            .iter()
+            .find(|track| track.kind == TrackKind::Video && track.enabled)
+            && let Some(clip) = track
+                .clips
+                .iter()
+                .find(|clip| clip.start <= self.position && self.position < clip.end())
+        {
+            return clip
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+        }
+        self.library
+            .selected_path()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "预览".to_owned())
+    }
+
+    fn preview_source_at(&self) -> Option<(PathBuf, u64, (u32, u32))> {
+        if !self.timeline.is_empty() {
+            for track in self.timeline.tracks() {
+                if track.kind != TrackKind::Video || !track.enabled {
+                    continue;
+                }
+                if let Some(clip) = track
+                    .clips
+                    .iter()
+                    .find(|clip| clip.start <= self.position && self.position < clip.end())
+                {
+                    let elapsed = self.position.saturating_sub(clip.start);
+                    let source_time = clip.source_start.saturating_add(
+                        elapsed
+                            .saturating_mul(u64::from(clip.speed_milli.max(1)))
+                            .checked_div(1000)
+                            .unwrap_or(u64::MAX),
+                    );
+                    let size = self
+                        .library
+                        .info(&clip.path)
+                        .map(|info| (info.width, info.height))
+                        .filter(|(width, height)| *width > 0 && *height > 0)
+                        .unwrap_or((16, 9));
+                    return Some((clip.path.clone(), source_time, size));
+                }
+            }
+        }
+        let path = self.library.selected_path()?.to_owned();
+        let size = self
+            .library
+            .info(&path)
+            .map(|info| (info.width, info.height))
+            .filter(|(width, height)| *width > 0 && *height > 0)
+            .unwrap_or((16, 9));
+        Some((path, 0, size))
+    }
+
+    fn preview_proxy_path(&mut self) -> Option<PathBuf> {
+        if !self.player.playing || self.player.quality() == PreviewQuality::Full {
+            return None;
+        }
+        let (path, _, _) = self.preview_source_at()?;
+        let info = self.library.info(&path)?;
+        self.proxy_cache.ensure(&path, info)
+    }
+
+    fn prepare_current_proxy(&mut self) {
+        let Some((path, _, _)) = self.preview_source_at() else {
+            return;
+        };
+        let Some(info) = self.library.info(&path) else {
+            return;
+        };
+        let _ = self.proxy_cache.ensure(&path, info);
+    }
+
+    fn prepare_project_proxies(&mut self) {
+        let paths = self
+            .timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video && track.enabled)
+            .flat_map(|track| track.clips.iter().map(|clip| clip.path.clone()))
+            .collect::<HashSet<_>>();
+        for path in paths {
+            if let Some(info) = self.library.info(&path) {
+                let _ = self.proxy_cache.ensure(&path, info);
+            }
+        }
+    }
+
+    fn prepare_current_audio_cache(&mut self) {
+        if self.player.is_scrubbing() {
+            return;
+        }
+        let Some(span) = Span::at(&self.timeline, self.position) else {
+            return;
+        };
+        self.player.prepare_scrub_audio(
+            self.tools.as_ref(),
+            span,
+            &mut self.library,
+            self.position,
+        );
+    }
+
+    fn texture_size(texture: &egui::TextureHandle) -> (u32, u32) {
+        let [width, height] = texture.size();
+        (width as u32, height as u32)
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
@@ -1402,12 +1731,130 @@ impl Workspace {
         if self.overlay_inspector(ui) {
             return;
         }
-        if let Some(clip) = self.selected_clip.and_then(|id| self.timeline.clip(id)) {
-            inspector_details::media(ui, &clip.path, self.library.info(&clip.path), Some(clip));
+        if let Some(id) = self.selected_clip
+            && let Some(clip) = self.timeline.clip(id).cloned()
+        {
+            inspector_details::media(ui, &clip.path, self.library.info(&clip.path), Some(&clip));
+            ui.separator();
+            self.clip_inspector_controls(ui, id);
         } else if !self.timeline.is_empty() {
             inspector_details::sequence(ui, &self.timeline);
         } else if let Some(path) = self.library.selected_path() {
             inspector_details::media(ui, path, self.library.info(path), None);
+        }
+    }
+
+    fn clip_inspector_controls(&mut self, ui: &mut egui::Ui, id: u64) {
+        let Some(clip) = self.timeline.clip(id).cloned() else {
+            return;
+        };
+        let kind = self.timeline.track_for_clip(id).map(|track| track.kind);
+        let colors = ui_theme::palette(ui.ctx());
+        ui.label(RichText::new("片段属性").size(12.0).strong().color(colors.text));
+        ui.add_space(4.0);
+
+        ui.collapsing("速度与方向", |ui| {
+            let mut speed = clip.speed_milli;
+            egui::ComboBox::from_id_salt(("clip-speed", id))
+                .width(ui.available_width())
+                .selected_text(format!("{}x", f32::from(speed) / 1000.0))
+                .show_ui(ui, |ui| {
+                    for value in [500_u16, 1000, 1500, 2000] {
+                        ui.selectable_value(
+                            &mut speed,
+                            value,
+                            format!("{}x", f32::from(value) / 1000.0),
+                        );
+                    }
+                });
+            if speed != clip.speed_milli {
+                if let Err(error) = self.timeline.set_clip_speed(id, speed) {
+                    self.show_notice(error.to_string(), true);
+                }
+            }
+
+            let mut reverse = clip.reverse;
+            if ui.checkbox(&mut reverse, "倒放").changed()
+                && let Err(error) = self.timeline.set_clip_reverse(id, reverse)
+            {
+                self.show_notice(error.to_string(), true);
+            }
+        });
+
+        if matches!(kind, Some(TrackKind::Audio | TrackKind::Video)) {
+            ui.collapsing("音频", |ui| {
+                let mut volume = clip.volume_db_tenths;
+                if ui
+                    .add(egui::Slider::new(&mut volume, -600..=120).text("音量").suffix(" dB"))
+                    .changed()
+                    && let Err(error) = self.timeline.set_clip_volume(id, volume)
+                {
+                    self.show_notice(error.to_string(), true);
+                }
+                if ui.button("重置音量").clicked()
+                    && let Err(error) = self.timeline.set_clip_volume(id, 0)
+                {
+                    self.show_notice(error.to_string(), true);
+                }
+            });
+        }
+
+        if matches!(kind, Some(TrackKind::Audio | TrackKind::Video)) {
+            ui.collapsing("淡化", |ui| {
+                let max_fade = clip.duration().min(5_000_000);
+                let mut fade_in = clip.fade_in_us;
+                if ui
+                    .add(egui::Slider::new(&mut fade_in, 0..=max_fade).text("淡入"))
+                    .changed()
+                    && let Err(error) = self.timeline.set_clip_fade_in(id, fade_in)
+                {
+                    self.show_notice(error.to_string(), true);
+                }
+                let mut fade_out = clip.fade_out_us;
+                if ui
+                    .add(egui::Slider::new(&mut fade_out, 0..=max_fade).text("淡出"))
+                    .changed()
+                    && let Err(error) = self.timeline.set_clip_fade_out(id, fade_out)
+                {
+                    self.show_notice(error.to_string(), true);
+                }
+            });
+        }
+
+        if let Some(transition) = &clip.transition_in {
+            ui.collapsing("转场", |ui| {
+                ui.label(format!(
+                    "{} · {:.1}s",
+                    transition.id,
+                    transition.duration_us as f32 / 1_000_000.0
+                ));
+                if ui.button("清除转场").clicked()
+                    && let Err(error) = self.timeline.set_clip_transition_in(id, None)
+                {
+                    self.show_notice(error.to_string(), true);
+                }
+            });
+        }
+
+        let group = self
+            .timeline_view
+            .selected_group(self.selected_clip)
+            .to_vec();
+        if group.len() > 1 {
+            ui.collapsing("片段关系", |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("链接选中片段").clicked()
+                        && let Err(error) = self.timeline.link_clips(&group)
+                    {
+                        self.show_notice(error.to_string(), true);
+                    }
+                    if ui.button("取消链接").clicked()
+                        && let Err(error) = self.timeline.unlink_clips(&group)
+                    {
+                        self.show_notice(error.to_string(), true);
+                    }
+                });
+            });
         }
     }
 
@@ -1685,7 +2132,7 @@ impl Workspace {
     }
 
     fn project_thumbnail_source(&self, path: &Path) -> Option<PathBuf> {
-        let (timeline, _, _, _, _) = project::load_with_cursor(path).ok()?;
+        let (timeline, _, _, _, _, _) = project::load_with_cursor(path).ok()?;
         timeline
             .tracks()
             .iter()
@@ -1786,6 +2233,7 @@ impl Workspace {
         self.timeline = Timeline::from_tracks(Vec::new()).expect("empty timeline is valid");
         self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
         self.project = None;
+        self.proxy_cache.set_project(None);
         self.selected_clip = None;
         self.position = 0;
         self.saved_revision = self.timeline.revision();
@@ -1821,6 +2269,7 @@ impl eframe::App for Workspace {
         #[cfg(windows)]
         window_frame::restore_clipboard_shortcut(ctx, raw_input);
         self.material_drag.process(ctx, raw_input);
+        self.transition_panel.process(ctx, raw_input);
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
@@ -1835,6 +2284,9 @@ impl eframe::App for Workspace {
         }
         self.focused = focused;
         self.library.poll();
+        self.proxy_cache.poll();
+        self.prepare_project_proxies();
+        self.prepare_current_audio_cache();
         self.poll_speech(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.narration.busy() {

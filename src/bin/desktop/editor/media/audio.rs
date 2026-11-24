@@ -1,10 +1,12 @@
 use std::fmt::Write;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,7 +16,7 @@ use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 use eframe::egui;
 
 use super::{
-    Decoder, MediaSlice, PlaybackClock, PreviewError, append_clip_volume_filter, hidden_command,
+    Decoder, MediaSlice, PlaybackClock, PreviewError, append_clip_audio_filters, hidden_command,
     local_media, seconds,
 };
 
@@ -152,6 +154,417 @@ impl AudioDecode {
     }
 }
 
+enum ScrubCommand {
+    Play {
+        executable: PathBuf,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+        position: u64,
+        sample_rate: u32,
+        channels: u16,
+    },
+    Prepare {
+        executable: PathBuf,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+        sample_rate: u32,
+        channels: u16,
+    },
+    Stop,
+}
+
+pub(super) struct ScrubAudio {
+    requests: mpsc::Sender<ScrubCommand>,
+    state: Arc<Mutex<ScrubState>>,
+    _stream: cpal::Stream,
+}
+
+struct ScrubState {
+    samples: Vec<f32>,
+    channels: usize,
+}
+
+struct ScrubCache {
+    key: u64,
+    samples: Vec<f32>,
+    channels: u16,
+    sample_rate: u32,
+    timeline_start: u64,
+    duration_us: u64,
+}
+
+impl ScrubAudio {
+    pub(super) fn new() -> Result<Self> {
+        let device = cpal::default_host()
+            .default_output_device()
+            .context("未找到默认音频输出设备")?;
+        let cfg = device
+            .default_output_config()
+            .context("无法读取默认音频输出格式")?;
+        let config = cfg.config();
+        let state = Arc::new(Mutex::new(ScrubState {
+            samples: Vec::new(),
+            channels: 2,
+        }));
+        let output_state = Arc::clone(&state);
+        let report = |_error| {};
+        macro_rules! output {
+            ($sample:ty) => {
+                device.build_output_stream(
+                    &config,
+                    move |samples: &mut [$sample], _info| {
+                        fill_scrub_samples(samples, &output_state, config.channels as usize)
+                    },
+                    report,
+                    None,
+                )
+            };
+        }
+        let stream = match cfg.sample_format() {
+            SampleFormat::F32 => output!(f32),
+            SampleFormat::F64 => output!(f64),
+            SampleFormat::I16 => output!(i16),
+            SampleFormat::I32 => output!(i32),
+            SampleFormat::U16 => output!(u16),
+            other => bail!("当前音频输出格式不受支持（{other}）"),
+        }
+        .context("无法打开拖动音频输出")?;
+        stream.play().context("无法启动拖动音频输出")?;
+
+        let (requests, incoming) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        thread::Builder::new()
+            .name("scrub-audio".into())
+            .spawn(move || scrub_worker(incoming, worker_state))
+            .context("无法启动拖动音频线程")?;
+        Ok(Self {
+            requests,
+            state,
+            _stream: stream,
+        })
+    }
+
+    pub(super) fn play(
+        &self,
+        executable: &Path,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+        position: u64,
+    ) {
+        let sample_rate = 48_000;
+        let _ = self.requests.send(ScrubCommand::Play {
+            executable: executable.to_owned(),
+            sources,
+            duration_us,
+            timeline_start,
+            position,
+            sample_rate,
+            channels: 2,
+        });
+    }
+
+    pub(super) fn stop(&self) {
+        let _ = self.requests.send(ScrubCommand::Stop);
+        if let Ok(mut state) = self.state.lock() {
+            state.samples.clear();
+        }
+    }
+
+    pub(super) fn prepare(
+        &self,
+        executable: &Path,
+        sources: Vec<MediaSlice>,
+        duration_us: u64,
+        timeline_start: u64,
+    ) {
+        let _ = self.requests.send(ScrubCommand::Prepare {
+            executable: executable.to_owned(),
+            sources,
+            duration_us,
+            timeline_start,
+            sample_rate: 48_000,
+            channels: 2,
+        });
+    }
+}
+
+fn scrub_worker(receiver: Receiver<ScrubCommand>, state: Arc<Mutex<ScrubState>>) {
+    let mut pending = None;
+    let mut cache = None;
+    loop {
+        let command = pending.take().or_else(|| receiver.recv().ok());
+        let Some(command) = command else { return };
+        match command {
+            ScrubCommand::Stop => {
+                if let Ok(mut state) = state.lock() {
+                    state.samples.clear();
+                }
+            }
+            ScrubCommand::Play {
+                executable,
+                sources,
+                duration_us,
+                timeline_start,
+                position,
+                sample_rate,
+                channels,
+            } => {
+                pending = play_scrub_audio_request(
+                    &receiver,
+                    &state,
+                    &mut cache,
+                    &executable,
+                    &sources,
+                    duration_us,
+                    timeline_start,
+                    position,
+                    sample_rate,
+                    channels,
+                );
+            }
+            ScrubCommand::Prepare {
+                executable,
+                sources,
+                duration_us,
+                timeline_start,
+                sample_rate,
+                channels,
+            } => {
+                pending = prepare_scrub_audio_request(
+                    &receiver,
+                    &state,
+                    &mut cache,
+                    &executable,
+                    &sources,
+                    duration_us,
+                    timeline_start,
+                    sample_rate,
+                    channels,
+                );
+            }
+        }
+    }
+}
+
+fn play_scrub_audio_request(
+    receiver: &Receiver<ScrubCommand>,
+    state: &Arc<Mutex<ScrubState>>,
+    cache: &mut Option<ScrubCache>,
+    executable: &Path,
+    sources: &[MediaSlice],
+    duration_us: u64,
+    timeline_start: u64,
+    position: u64,
+    sample_rate: u32,
+    channels: u16,
+) -> Option<ScrubCommand> {
+    let key = scrub_cache_key(sources, duration_us, sample_rate, channels);
+    if cache.as_ref().is_some_and(|cached| {
+        cached.key == key
+            && position >= cached.timeline_start
+            && position < cached.timeline_start.saturating_add(cached.duration_us)
+    }) {
+        if let Some(cached) = cache.as_ref() {
+            fill_cached_scrub_audio(state, cached, position);
+        }
+        return take_latest_scrub_command(receiver, None);
+    }
+    decode_scrub_audio_buffer(
+        receiver,
+        state,
+        cache,
+        executable,
+        sources,
+        duration_us,
+        timeline_start,
+        position,
+        sample_rate,
+        channels,
+        key,
+        true,
+    )
+}
+
+fn decode_scrub_audio_buffer(
+    receiver: &Receiver<ScrubCommand>,
+    state: &Arc<Mutex<ScrubState>>,
+    cache: &mut Option<ScrubCache>,
+    executable: &Path,
+    sources: &[MediaSlice],
+    duration_us: u64,
+    timeline_start: u64,
+    position: u64,
+    sample_rate: u32,
+    channels: u16,
+    key: u64,
+    emit: bool,
+) -> Option<ScrubCommand> {
+    let mut command = mix_command(executable, sources, duration_us, sample_rate, channels).ok()?;
+    let mut child = command.stdout(Stdio::piped()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut decoded = Vec::new();
+    let mut bytes = vec![0_u8; (sample_rate / 50) as usize * usize::from(channels) * 4];
+    let mut pending = None;
+    loop {
+        while let Ok(command) = receiver.try_recv() {
+            if matches!(command, ScrubCommand::Stop) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(command);
+            }
+            if !emit && matches!(command, ScrubCommand::Play { .. }) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(command);
+            }
+            pending = Some(command);
+        }
+        let mut read = 0;
+        while read < bytes.len() {
+            match stdout.read(&mut bytes[read..]) {
+                Ok(0) => {
+                    let samples = decoded;
+                    let cached = ScrubCache {
+                        key,
+                        samples,
+                        channels,
+                        sample_rate,
+                        timeline_start,
+                        duration_us,
+                    };
+                    if emit {
+                        fill_cached_scrub_audio(state, &cached, position);
+                    }
+                    *cache = Some(cached);
+                    return pending;
+                }
+                Ok(count) => read += count,
+                Err(_) => return pending,
+            }
+        }
+        decoded.extend(bytes[..read]
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap())));
+    }
+}
+
+fn prepare_scrub_audio_request(
+    receiver: &Receiver<ScrubCommand>,
+    state: &Arc<Mutex<ScrubState>>,
+    cache: &mut Option<ScrubCache>,
+    executable: &Path,
+    sources: &[MediaSlice],
+    duration_us: u64,
+    timeline_start: u64,
+    sample_rate: u32,
+    channels: u16,
+) -> Option<ScrubCommand> {
+    let key = scrub_cache_key(sources, duration_us, sample_rate, channels);
+    if cache.as_ref().is_some_and(|cached| {
+        cached.key == key && cached.duration_us >= duration_us
+    }) {
+        return take_latest_scrub_command(receiver, None);
+    }
+    decode_scrub_audio_buffer(
+        receiver,
+        state,
+        cache,
+        executable,
+        sources,
+        duration_us,
+        timeline_start,
+        timeline_start,
+        sample_rate,
+        channels,
+        key,
+        false,
+    )
+}
+
+fn take_latest_scrub_command(
+    receiver: &Receiver<ScrubCommand>,
+    initial: Option<ScrubCommand>,
+) -> Option<ScrubCommand> {
+    let mut latest = initial;
+    while let Ok(command) = receiver.try_recv() {
+        latest = Some(command);
+    }
+    latest
+}
+
+fn scrub_cache_key(
+    sources: &[MediaSlice],
+    _duration_us: u64,
+    sample_rate: u32,
+    channels: u16,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sample_rate.hash(&mut hasher);
+    channels.hash(&mut hasher);
+    for source in sources {
+        source.id.hash(&mut hasher);
+        source.path.hash(&mut hasher);
+        source.timeline_start.hash(&mut hasher);
+        source.timeline_duration_us.hash(&mut hasher);
+        source.volume_db_tenths.hash(&mut hasher);
+        source.fade_in_us.hash(&mut hasher);
+        source.fade_out_us.hash(&mut hasher);
+        source.speed_milli.hash(&mut hasher);
+        source.reverse.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn fill_cached_scrub_audio(
+    state: &Arc<Mutex<ScrubState>>,
+    cache: &ScrubCache,
+    position: u64,
+) {
+    let channels = usize::from(cache.channels.max(1));
+    let offset = position
+        .saturating_sub(cache.timeline_start)
+        .saturating_mul(u64::from(cache.sample_rate))
+        .checked_div(1_000_000)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(channels as u64) as usize;
+    let window = (cache.sample_rate as usize * 120 / 1000).saturating_mul(channels);
+    let start = offset.min(cache.samples.len());
+    let end = start.saturating_add(window).min(cache.samples.len());
+    if let Ok(mut state) = state.lock() {
+        state.channels = channels;
+        state.samples.clear();
+        state.samples.extend_from_slice(&cache.samples[start..end]);
+    }
+}
+
+fn fill_scrub_samples<T: SizedSample + FromSample<f32>>(
+    samples: &mut [T],
+    state: &Arc<Mutex<ScrubState>>,
+    output_channels: usize,
+) {
+    samples.fill(T::EQUILIBRIUM);
+    let Ok(mut state) = state.try_lock() else {
+        return;
+    };
+    let source_channels = state.channels.max(1);
+    for frame in samples.chunks_mut(output_channels.max(1)) {
+        let left = state.samples.first().copied().unwrap_or_default();
+        let right = if source_channels > 1 {
+            state.samples.get(1).copied().unwrap_or(left)
+        } else {
+            left
+        };
+        let remove = source_channels.min(state.samples.len());
+        state.samples.drain(..remove);
+        for (index, sample) in frame.iter_mut().enumerate() {
+            *sample = T::from_sample(if index == 0 { left } else { right });
+        }
+    }
+}
+
 fn mix_command(
     executable: &Path,
     sources: &[MediaSlice],
@@ -184,7 +597,15 @@ fn mix_command(
             filters,
             "[{index}:a:0]asetpts=PTS-STARTPTS,aresample={rate}:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration={interval}"
         )?;
-        append_clip_volume_filter(&mut filters, source.volume_db_tenths);
+        append_clip_audio_filters(
+            &mut filters,
+            source.volume_db_tenths,
+            source.fade_in_us,
+            source.fade_out_us,
+            duration,
+            source.speed_milli,
+            source.reverse,
+        );
         write!(filters, "[a{index}];")?;
     }
     for index in 0..sources.len() {
@@ -343,7 +764,13 @@ mod tests {
                 id: frequency as u64,
                 path,
                 range: 200_000..700_000,
+                timeline_start: 0,
+                timeline_duration_us: 500_000,
                 volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            speed_milli: 1000,
+            reverse: false,
             }
         });
         let mix = |sources: &[MediaSlice]| {

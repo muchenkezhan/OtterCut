@@ -18,6 +18,8 @@ const MAX_PROJECT_BYTES: u64 = 16 * 1024 * 1024;
 struct Document {
     version: u32,
     playhead_us: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    markers: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     clips: Option<Vec<Clip>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,13 +34,13 @@ struct Document {
 
 #[cfg(test)]
 pub(super) fn load(path: &Path) -> Result<(Timeline, u64, CanvasFormat, BackgroundSettings)> {
-    let (timeline, position, canvas, background, _) = load_with_cursor(path)?;
+    let (timeline, position, canvas, background, _, _) = load_with_cursor(path)?;
     Ok((timeline, position, canvas, background))
 }
 
 pub(super) fn load_with_cursor(
     path: &Path,
-) -> Result<(Timeline, u64, CanvasFormat, BackgroundSettings, CursorEffect)> {
+) -> Result<(Timeline, u64, CanvasFormat, BackgroundSettings, CursorEffect, Vec<u64>)> {
     let file = File::open(path).context("无法打开剪辑工程")?;
     ensure!(
         file.metadata()?.len() <= MAX_PROJECT_BYTES,
@@ -77,10 +79,17 @@ pub(super) fn load_with_cursor(
     }
     .context("剪辑工程的时间线无效")?;
     let playhead = document.playhead_us.min(timeline.duration());
+    let mut markers = document
+        .markers
+        .into_iter()
+        .filter(|marker| *marker <= timeline.duration())
+        .collect::<Vec<_>>();
+    markers.sort_unstable();
+    markers.dedup();
     let cursor_effect = document
         .cursor_effect
         .unwrap_or_else(|| CursorEffect::default_for(timeline.duration()));
-    Ok((timeline, playhead, canvas, background, cursor_effect))
+    Ok((timeline, playhead, canvas, background, cursor_effect, markers))
 }
 
 #[cfg(test)]
@@ -98,6 +107,7 @@ pub(super) fn save(
         canvas,
         background,
         &CursorEffect::default_for(timeline.duration()),
+        &[],
     )
 }
 
@@ -108,6 +118,7 @@ pub(super) fn save_with_cursor(
     canvas: CanvasFormat,
     background: &BackgroundSettings,
     cursor_effect: &CursorEffect,
+    markers: &[u64],
 ) -> Result<()> {
     ensure!(
         path.extension()
@@ -145,6 +156,11 @@ pub(super) fn save_with_cursor(
             MEDIA_VERSION
         },
         playhead_us: playhead.min(timeline.duration()),
+        markers: markers
+            .iter()
+            .copied()
+            .filter(|marker| *marker <= timeline.duration())
+            .collect(),
         clips: None,
         tracks: Some(tracks),
         canvas: (!canvas.is_original()).then_some(canvas),

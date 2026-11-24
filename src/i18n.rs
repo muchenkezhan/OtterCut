@@ -78,6 +78,7 @@ pub mod key {
     pub const CAPTIONS: MessageKey = MessageKey("editor.captions");
     pub const TEXT: MessageKey = MessageKey("editor.text");
     pub const BACKGROUND: MessageKey = MessageKey("editor.background");
+    pub const TRANSITIONS: MessageKey = MessageKey("editor.transitions");
     pub const ADD_TO_TRACK: MessageKey = MessageKey("editor.add_to_track");
     pub const VIEW_INFO: MessageKey = MessageKey("editor.view_info");
     pub const OPEN_FOLDER: MessageKey = MessageKey("editor.open_folder");
@@ -195,6 +196,7 @@ pub mod key {
         CAPTIONS,
         TEXT,
         BACKGROUND,
+        TRANSITIONS,
         ADD_TO_TRACK,
         VIEW_INFO,
         OPEN_FOLDER,
@@ -423,6 +425,7 @@ fn message_zh(key: MessageKey) -> &'static str {
         "editor.captions" => "字幕",
         "editor.text" => "文本",
         "editor.background" => "背景",
+        "editor.transitions" => "转场",
         "editor.add_to_track" => "添加到时间线",
         "editor.view_info" => "查看素材信息",
         "editor.open_folder" => "打开所在文件夹",
@@ -543,6 +546,7 @@ fn message_en(key: MessageKey) -> &'static str {
         "editor.captions" => "Captions",
         "editor.text" => "Text",
         "editor.background" => "Background",
+        "editor.transitions" => "Transitions",
         "editor.add_to_track" => "Add to timeline",
         "editor.view_info" => "View media info",
         "editor.open_folder" => "Open containing folder",
