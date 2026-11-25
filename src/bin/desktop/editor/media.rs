@@ -1580,10 +1580,18 @@ impl VideoDecode {
                 let frame_time = self
                     .timeline_from
                     .saturating_add(count * USECS_PER_SEC / VIDEO_FPS);
+                let source_elapsed = frame_time
+                    .saturating_sub(self.timeline_from)
+                    .saturating_mul(u64::from(self.speed_milli.max(1)))
+                    .checked_div(1000)
+                    .unwrap_or(u64::MAX);
+                let cursor_time = if self.reverse {
+                    self.span.until_us.saturating_sub(1).saturating_sub(source_elapsed)
+                } else {
+                    self.span.from_us.saturating_add(source_elapsed)
+                };
                 if let Some(telemetry) = &self.cursor
-                    && let Some(sample) = telemetry.sample_at(
-                        frame_time,
-                    )
+                    && let Some(sample) = telemetry.sample_at(cursor_time)
                     && self.cursor_effect.contains(frame_time)
                 {
                     render_cursor_overlay(
@@ -1595,7 +1603,7 @@ impl VideoDecode {
                         sample.pressed,
                         self.cursor_effect.cursor_scale,
                         self.cursor_effect.click_effect,
-                        telemetry.zoom_scale_at(frame_time, self.cursor_effect.zoom_scale),
+                        telemetry.zoom_scale_at(cursor_time, self.cursor_effect.zoom_scale),
                     );
                 }
                 self.frames.send(VideoFrame {

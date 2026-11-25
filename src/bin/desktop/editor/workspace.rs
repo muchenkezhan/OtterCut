@@ -1,7 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::PRODUCT_NAME;
@@ -15,7 +16,9 @@ use super::asset_info;
 use super::background::{BackgroundSettings, BackgroundSource};
 use super::background_panel;
 use super::canvas_format::CanvasFormat;
-use super::cursor_effect::{CursorClickEffect, CursorEffect, CursorTelemetry};
+use super::cursor_effect::{
+    CursorClickEffect, CursorEffect, CursorTelemetry, timeline_time_for_sample,
+};
 use super::dock_model::{DockState, Pane};
 use super::export::{ExportJob, ExportQuality, ExportResolution, ExportSettings};
 use super::feature_panel::{self, FeatureTab};
@@ -79,6 +82,7 @@ pub(super) struct Workspace {
     saved_background: BackgroundSettings,
     cursor_effect: CursorEffect,
     saved_cursor_effect: CursorEffect,
+    cursor_marker_cache: CursorMarkerCache,
     markers: Vec<u64>,
     saved_markers: Vec<u64>,
     position: u64,
@@ -106,6 +110,13 @@ struct MaterialAddition {
     path: PathBuf,
     destination: TrackDestination,
     at: Option<u64>,
+}
+
+#[derive(Default)]
+struct CursorMarkerCache {
+    key: Option<u64>,
+    markers: Vec<u64>,
+    available: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,6 +166,7 @@ impl Workspace {
             saved_background: BackgroundSettings::default(),
             cursor_effect: CursorEffect::default_for(1),
             saved_cursor_effect: CursorEffect::default_for(1),
+            cursor_marker_cache: CursorMarkerCache::default(),
             markers: Vec::new(),
             saved_markers: Vec::new(),
             position: 0,
@@ -464,6 +476,7 @@ impl Workspace {
                 }
                 self.timeline = timeline;
                 self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
+                self.cursor_marker_cache = CursorMarkerCache::default();
                 self.saved_revision = self.timeline.revision();
                 self.canvas_format = canvas_format;
                 self.saved_canvas_format = canvas_format;
@@ -1232,13 +1245,17 @@ impl Workspace {
         } else {
             self.position
         };
-        self.timeline_view.set_cursor_markers(self.cursor_markers());
+        let (cursor_markers, cursor_available) =
+            cursor_markers(&self.timeline, &mut self.cursor_marker_cache);
+        self.timeline_view
+            .set_cursor_markers(cursor_markers, cursor_available);
         self.timeline_view.set_user_markers(self.markers.clone());
-        let input = self.timeline_view.draw(
+        let input = self.timeline_view.draw_with_cursor_effect(
             ui,
             &mut self.timeline,
             &mut position,
             &mut self.selected_clip,
+            &mut self.cursor_effect,
             add_enabled,
         );
         let recognize_audio_track = input.recognize_audio_track;
@@ -1360,29 +1377,6 @@ impl Workspace {
         } else if self.position != old_position && !input.playhead_seek {
             self.player.reset();
         }
-    }
-
-    fn cursor_markers(&self) -> Vec<u64> {
-        self.timeline
-            .tracks()
-            .iter()
-            .filter(|track| track.kind == TrackKind::Video)
-            .flat_map(|track| {
-                track.clips.iter().flat_map(|clip| {
-                    let path = PathBuf::from(format!("{}.cursor.json", clip.path.display()));
-                    CursorTelemetry::load(&path)
-                        .ok()
-                        .into_iter()
-                        .flat_map(move |telemetry| {
-                            telemetry
-                                .samples
-                                .into_iter()
-                                .filter(|sample| sample.pressed)
-                                .map(move |sample| clip.start.saturating_add(sample.at_us))
-                        })
-                })
-            })
-            .collect()
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
@@ -1761,7 +1755,7 @@ impl Workspace {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        if self.cursor_telemetry_available() {
+        if self.timeline_view.cursor_track_selected() && self.cursor_telemetry_available() {
             self.cursor_effect_inspector(ui);
             ui.separator();
         }
@@ -1907,49 +1901,52 @@ impl Workspace {
     }
 
     fn cursor_effect_inspector(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("鼠标效果", |ui| {
-            let duration = self.duration().max(1);
-            ui.add(
-                egui::Slider::new(&mut self.cursor_effect.start_us, 0..=duration)
-                    .text("开始"),
-            );
-            self.cursor_effect.start_us = self.cursor_effect.start_us.min(duration - 1);
-            ui.add(
-                egui::Slider::new(
-                    &mut self.cursor_effect.end_us,
-                    (self.cursor_effect.start_us + 1)..=duration,
-                )
-                .text("结束"),
-            );
-            ui.checkbox(&mut self.cursor_effect.enabled, "显示鼠标");
-            ui.add(
-                egui::Slider::new(&mut self.cursor_effect.cursor_scale, 0.5..=4.0)
-                    .text("鼠标大小"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.cursor_effect.zoom_scale, 1.0..=3.0)
-                    .text("点击放大"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.cursor_effect.smoothing, 0.0..=1.0)
-                    .text("跟随平滑"),
-            );
-            ui.horizontal(|ui| {
-                ui.label("点击反馈");
-                for (effect, label) in [
-                    (CursorClickEffect::Ring, "波纹"),
-                    (CursorClickEffect::Dot, "圆点"),
-                    (CursorClickEffect::None, "无"),
-                ] {
-                    if ui
-                        .selectable_label(self.cursor_effect.click_effect == effect, label)
-                        .clicked()
-                    {
-                        self.cursor_effect.click_effect = effect;
+        egui::CollapsingHeader::new("鼠标轨道")
+            .default_open(true)
+            .show(ui, |ui| {
+                let duration = self.duration().max(1);
+                ui.label("拖动时间线中的鼠标效果块可移动，拖两端可调整范围。");
+                ui.add(
+                    egui::Slider::new(&mut self.cursor_effect.start_us, 0..=duration)
+                        .text("开始"),
+                );
+                self.cursor_effect.start_us = self.cursor_effect.start_us.min(duration - 1);
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.cursor_effect.end_us,
+                        (self.cursor_effect.start_us + 1)..=duration,
+                    )
+                    .text("结束"),
+                );
+                ui.checkbox(&mut self.cursor_effect.enabled, "显示鼠标");
+                ui.add(
+                    egui::Slider::new(&mut self.cursor_effect.cursor_scale, 0.5..=4.0)
+                        .text("鼠标大小"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.cursor_effect.zoom_scale, 1.0..=3.0)
+                        .text("点击放大"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.cursor_effect.smoothing, 0.0..=1.0)
+                        .text("跟随平滑"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("点击反馈");
+                    for (effect, label) in [
+                        (CursorClickEffect::Ring, "波纹"),
+                        (CursorClickEffect::Dot, "圆点"),
+                        (CursorClickEffect::None, "无"),
+                    ] {
+                        if ui
+                            .selectable_label(self.cursor_effect.click_effect == effect, label)
+                            .clicked()
+                        {
+                            self.cursor_effect.click_effect = effect;
+                        }
                     }
-                }
+                });
             });
-        });
     }
 
     fn home_screen(&mut self, ui: &mut egui::Ui) {
@@ -2408,6 +2405,7 @@ impl Workspace {
     fn new_project(&mut self, ctx: &egui::Context) {
         self.timeline = Timeline::from_tracks(Vec::new()).expect("empty timeline is valid");
         self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
+        self.cursor_marker_cache = CursorMarkerCache::default();
         self.project = None;
         self.proxy_cache.set_project(None);
         self.selected_clip = None;
@@ -2438,6 +2436,83 @@ fn format_modified(modified: SystemTime) -> String {
         format!("{} 天前修改", age.as_secs() / 86_400)
     };
     label
+}
+
+fn cursor_markers<'a>(
+    timeline: &Timeline,
+    cache: &'a mut CursorMarkerCache,
+) -> (&'a [u64], bool) {
+    let key = cursor_marker_cache_key(timeline);
+    if cache.key != Some(key) {
+        let mut markers = Vec::new();
+        let mut available = false;
+        for clip in timeline
+            .tracks()
+            .iter()
+            .filter(|track| track.kind == TrackKind::Video)
+            .flat_map(|track| &track.clips)
+        {
+            let path = PathBuf::from(format!("{}.cursor.json", clip.path.display()));
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(telemetry) = CursorTelemetry::load(&path) else {
+                continue;
+            };
+            available = true;
+            markers.extend(
+                telemetry
+                    .samples
+                    .iter()
+                    .filter(|sample| sample.pressed)
+                    .filter_map(|sample| timeline_time_for_sample(clip, sample.at_us)),
+            );
+        }
+        markers.sort_unstable();
+        markers.dedup();
+        *cache = CursorMarkerCache {
+            key: Some(key),
+            markers,
+            available,
+        };
+    }
+    (&cache.markers, cache.available)
+}
+
+fn cursor_marker_cache_key(timeline: &Timeline) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for track in timeline
+        .tracks()
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+    {
+        track.id.hash(&mut hasher);
+        for clip in &track.clips {
+            clip.id.hash(&mut hasher);
+            clip.path.hash(&mut hasher);
+            clip.start.hash(&mut hasher);
+            clip.source_start.hash(&mut hasher);
+            clip.source_end.hash(&mut hasher);
+            clip.speed_milli.hash(&mut hasher);
+            clip.reverse.hash(&mut hasher);
+            clip.timeline_duration_us.hash(&mut hasher);
+            let path = PathBuf::from(format!("{}.cursor.json", clip.path.display()));
+            match fs::metadata(path) {
+                Ok(metadata) => {
+                    true.hash(&mut hasher);
+                    metadata.len().hash(&mut hasher);
+                    metadata
+                        .modified()
+                        .ok()
+                        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                        .map(|modified| (modified.as_secs(), modified.subsec_nanos()))
+                        .hash(&mut hasher);
+                }
+                Err(_) => false.hash(&mut hasher),
+            }
+        }
+    }
+    hasher.finish()
 }
 
 impl eframe::App for Workspace {

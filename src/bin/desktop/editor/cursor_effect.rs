@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
+use takeseam::editor_timeline::Clip;
 
 const TELEMETRY_VERSION: u32 = 1;
 const MAX_SAMPLES: usize = 2_000_000;
@@ -113,6 +114,22 @@ impl CursorTelemetry {
         );
         Ok(())
     }
+}
+
+pub(super) fn timeline_time_for_sample(clip: &Clip, source_time_us: u64) -> Option<u64> {
+    if source_time_us < clip.source_start || source_time_us >= clip.source_end {
+        return None;
+    }
+    let source_offset = if clip.reverse {
+        clip.source_end.saturating_sub(1).saturating_sub(source_time_us)
+    } else {
+        source_time_us.saturating_sub(clip.source_start)
+    };
+    let timeline_offset = source_offset
+        .saturating_mul(1000)
+        .checked_div(u64::from(clip.speed_milli.max(1)))?;
+    let timeline_time = clip.start.saturating_add(timeline_offset);
+    (timeline_time < clip.end()).then_some(timeline_time)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,5 +244,53 @@ mod tests {
             click_effect: CursorClickEffect::Ring,
         };
         assert!(effect.validate().is_err());
+    }
+
+    #[test]
+    fn maps_recorded_clicks_through_trimmed_and_sped_up_video() {
+        let clip = Clip {
+            id: 1,
+            path: "recording.mp4".into(),
+            media_duration: 10_000_000,
+            source_start: 2_000_000,
+            source_end: 8_000_000,
+            start: 5_000_000,
+            volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 2000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
+            text: None,
+        };
+        assert_eq!(timeline_time_for_sample(&clip, 4_000_000), Some(6_000_000));
+        assert_eq!(timeline_time_for_sample(&clip, 8_000_000), None);
+    }
+
+    #[test]
+    fn maps_recorded_clicks_backwards_for_reversed_video() {
+        let mut clip = Clip {
+            id: 1,
+            path: "recording.mp4".into(),
+            media_duration: 10_000_000,
+            source_start: 2_000_000,
+            source_end: 8_000_000,
+            start: 1_000_000,
+            volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 1000,
+            reverse: true,
+            timeline_duration_us: 0,
+            group_id: None,
+            text: None,
+        };
+        assert_eq!(timeline_time_for_sample(&clip, 7_000_000), Some(1_999_999));
+        assert_eq!(timeline_time_for_sample(&clip, 2_000_000), Some(6_999_999));
+        clip.speed_milli = 2000;
+        assert_eq!(timeline_time_for_sample(&clip, 7_000_000), Some(1_499_999));
     }
 }
