@@ -36,6 +36,8 @@ const PREVIEW_THUMBNAIL_SIZE: [usize; 2] = [960, 540];
 const FILMSTRIP_SIZE: [usize; 2] = [144, 81];
 const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_CACHE_CAPACITY: usize = 8;
+pub(super) const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp"];
+const STILL_IMAGE_DURATION_US: u64 = 5_000_000;
 
 #[derive(Clone)]
 pub struct MediaTools {
@@ -99,6 +101,7 @@ impl MediaTools {
 
     pub fn probe(&self, path: &Path) -> Result<MediaInfo> {
         let path = local_media(path)?;
+        let still_image = is_still_image(&path);
         let output = hidden_command(&self.ffprobe)
             .args([
                 "-v", "error", "-protocol_whitelist", "file,pipe",
@@ -130,10 +133,8 @@ impl MediaTools {
             video.is_some() || audio.is_some(),
             "素材中没有可剪辑的视频或音频流"
         );
-        let duration_us = duration_us(&info["format"]["duration"])
-            .or_else(|| video.and_then(|stream| duration_us(&stream["duration"])))
-            .or_else(|| audio.and_then(|stream| duration_us(&stream["duration"])))
-            .context("无法确定素材时长")?;
+        let duration_us =
+            probed_duration_us(&info, still_image, video, audio).context("无法确定素材时长")?;
         let (width, height) = video.map(video_dimensions).transpose()?.unwrap_or((0, 0));
         Ok(MediaInfo {
             duration_us,
@@ -182,6 +183,29 @@ fn is_executable(path: &Path) -> bool {
         return false;
     }
     metadata.is_file()
+}
+
+pub(super) fn is_still_image(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| {
+        IMAGE_EXTENSIONS
+            .iter()
+            .any(|image| extension.eq_ignore_ascii_case(image))
+    })
+}
+
+fn probed_duration_us(
+    info: &Value,
+    still_image: bool,
+    video: Option<&Value>,
+    audio: Option<&Value>,
+) -> Option<u64> {
+    if still_image {
+        Some(STILL_IMAGE_DURATION_US)
+    } else {
+        duration_us(&info["format"]["duration"])
+            .or_else(|| video.and_then(|stream| duration_us(&stream["duration"])))
+            .or_else(|| audio.and_then(|stream| duration_us(&stream["duration"])))
+    }
 }
 
 fn video_dimensions(video: &Value) -> Result<(u32, u32)> {
@@ -395,6 +419,86 @@ fn duration_us(value: &Value) -> Option<u64> {
     (micros >= 1.0 && micros < u64::MAX as f64).then_some(micros as u64)
 }
 
+#[cfg(test)]
+mod still_image_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_supported_image_extensions_case_insensitively() {
+        for name in ["frame.png", "frame.JPG", "frame.jpeg", "frame.WebP"] {
+            assert!(is_still_image(Path::new(name)), "{name}");
+        }
+        assert!(!is_still_image(Path::new("clip.mp4")));
+        assert!(!is_still_image(Path::new("animated.gif")));
+    }
+
+    #[test]
+    fn still_images_receive_a_default_timeline_duration() {
+        let info = serde_json::json!({"streams": [{}], "format": {}});
+        let video = &info["streams"][0];
+        assert_eq!(
+            probed_duration_us(&info, true, Some(video), None),
+            Some(STILL_IMAGE_DURATION_US)
+        );
+        assert_eq!(probed_duration_us(&info, false, None, None), None);
+    }
+
+    #[test]
+    fn static_image_decode_repeats_without_seeking_to_source_time() {
+        let command = decoding_command(
+            Path::new("/tools/ffmpeg"),
+            Path::new("frame.PNG"),
+            3_000_000,
+        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-loop" && pair[1] == "1")
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-framerate" && pair[1] == "30")
+        );
+        assert!(!args.iter().any(|argument| argument == "-ss"));
+    }
+
+    #[test]
+    fn timed_input_repeats_images_and_seeks_video() {
+        let mut image = Command::new("ffmpeg");
+        append_timed_input(&mut image, Path::new("frame.png"), 3_000_000);
+        let image_args = image
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            image_args,
+            [
+                "-f",
+                "image2",
+                "-pattern_type",
+                "none",
+                "-loop",
+                "1",
+                "-framerate",
+                "30",
+                "-i",
+                "frame.png"
+            ]
+        );
+
+        let mut video = Command::new("ffmpeg");
+        append_timed_input(&mut video, Path::new("clip.mp4"), 3_000_000);
+        let video_args = video
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(video_args, ["-ss", "3.000000", "-i", "clip.mp4"]);
+    }
+}
+
 pub(super) fn local_media(path: &Path) -> Result<PathBuf> {
     ensure!(path.is_file(), "素材文件不可用（{}）", path.display());
     if path.is_absolute() {
@@ -422,14 +526,29 @@ pub(super) fn decoding_command(executable: &Path, path: &Path, from_us: u64) -> 
             "-nostdin",
             "-protocol_whitelist",
             "file,pipe",
-            "-ss",
         ])
-        .arg(seconds(from_us))
-        .args(["-threads", "2", "-i"])
-        .arg(path)
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped());
+        .args(["-threads", "2"]);
+    append_timed_input(&mut command, path, from_us);
+    command.stderr(Stdio::null()).stdout(Stdio::piped());
     command
+}
+
+pub(super) fn append_timed_input(command: &mut Command, path: &Path, from_us: u64) {
+    if is_still_image(path) {
+        command.args([
+            "-f",
+            "image2",
+            "-pattern_type",
+            "none",
+            "-loop",
+            "1",
+            "-framerate",
+            "30",
+        ]);
+    } else {
+        command.args(["-ss", &seconds(from_us)]);
+    }
+    command.arg("-i").arg(path);
 }
 
 fn seconds(usecs: u64) -> String {
@@ -1384,7 +1503,12 @@ impl VideoDecode {
             command.args(["-t", &duration]);
             let fps = format!("fps={VIDEO_FPS}:start_time=0:eof_action=pass");
             let mut filter = fps;
-            if self.reverse {
+            if self.reverse
+                && self
+                    .path
+                    .as_deref()
+                    .is_none_or(|path| !is_still_image(path))
+            {
                 filter.push_str(",reverse");
             }
             if self.speed_milli != 1000 {

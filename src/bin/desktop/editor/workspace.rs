@@ -23,7 +23,7 @@ use super::file_menu::{self, FileAction};
 use super::inspector_details;
 use super::layout;
 use super::library::{AUDIO_EXTENSIONS, Library, filename};
-use super::media::{MediaInfo, MediaTools, PreviewQuality};
+use super::media::{IMAGE_EXTENSIONS, MediaInfo, MediaTools, PreviewQuality};
 use super::player::{Player, Span};
 use super::proxy_cache::ProxyCache;
 use super::preview_viewport::PreviewViewport;
@@ -235,10 +235,10 @@ impl Workspace {
         let dialog = match scope {
             MaterialScope::All => {
                 let video = ["mp4", "m4v", "mov", "mkv", "webm", "avi"];
-                let extensions = [video.as_slice(), AUDIO_EXTENSIONS].concat();
+                let extensions = [video.as_slice(), IMAGE_EXTENSIONS, AUDIO_EXTENSIONS].concat();
                 dialog
                     .set_title("导入素材")
-                    .add_filter("视频和音频", &extensions)
+                    .add_filter("视频、图片和音频", &extensions)
             }
             MaterialScope::Audio => dialog
                 .set_title("导入音频")

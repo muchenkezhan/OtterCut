@@ -18,8 +18,8 @@ use super::canvas_format::CanvasFormat;
 use super::media::background;
 use super::media::overlays::{Overlays, SCRIPT_NAME, sequence_size};
 use super::media::{
-    MediaInfo, MediaTools, append_segment_audio_filters, append_video_fades, hidden_command,
-    local_media, sequence_filter,
+    MediaInfo, MediaTools, append_segment_audio_filters, append_timed_input, append_video_fades,
+    hidden_command, local_media, sequence_filter,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,7 +544,7 @@ fn render_segment(
         .transpose()?;
     let mut input_filter = format!("fps={}:start_time=0", profile.fps);
     if let Some(clip) = segment.video {
-        if clip.reverse {
+        if clip.reverse && !super::media::is_still_image(&clip.path) {
             input_filter.push_str(",reverse");
         }
         if clip.speed_milli != 1000 {
@@ -633,11 +633,11 @@ fn input_clip(
     if audio_only {
         command.arg("-vn");
     }
-    command
-        .arg("-ss")
-        .arg(seconds(segment.source_position(clip)))
-        .arg("-i")
-        .arg(local_media(&clip.path)?);
+    append_timed_input(
+        command,
+        &local_media(&clip.path)?,
+        segment.source_position(clip),
+    );
     Ok(())
 }
 
