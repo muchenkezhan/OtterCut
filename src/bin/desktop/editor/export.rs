@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -15,11 +16,13 @@ use takeseam::editor_timeline::{Clip, Track, TrackKind};
 
 use super::background::BackgroundSettings;
 use super::canvas_format::CanvasFormat;
+use super::cursor_effect::{CursorEffect, CursorTelemetry, CursorZoom, ZoomSpring};
 use super::media::background;
 use super::media::overlays::{Overlays, SCRIPT_NAME, sequence_size};
 use super::media::{
-    MediaInfo, MediaTools, append_segment_audio_filters, append_timed_input, append_video_fades,
-    hidden_command, local_media, sequence_filter,
+    CursorViewport, MediaInfo, MediaTools, append_segment_audio_filters, append_timed_input,
+    append_video_fades, apply_cursor_effect, cursor_viewport, hidden_command, local_media,
+    sequence_filter,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +174,7 @@ impl ExportJob {
         settings: ExportSettings,
         canvas_format: CanvasFormat,
         backdrop: BackgroundSettings,
+        cursor_effect: CursorEffect,
     ) -> Result<()> {
         ensure!(!self.running(), "已有导出任务");
         ensure!(
@@ -191,6 +195,7 @@ impl ExportJob {
                     &settings,
                     canvas_format,
                     &backdrop,
+                    &cursor_effect,
                     &worker_cancel,
                     |completion| {
                         let _ = tx.send(Update::Progress(completion));
@@ -265,6 +270,7 @@ fn export(
         &settings,
         canvas_format,
         backdrop,
+        &CursorEffect::default_for(1),
         cancel,
         progress,
     )
@@ -276,6 +282,7 @@ fn export_with_settings(
     settings: &ExportSettings,
     canvas_format: CanvasFormat,
     backdrop: &BackgroundSettings,
+    cursor_effect: &CursorEffect,
     cancel: &AtomicBool,
     mut progress: impl FnMut(f32),
 ) -> Result<()> {
@@ -350,12 +357,53 @@ fn export_with_settings(
     boundaries.sort_unstable();
     boundaries.dedup();
     let mut manifest_text = String::from("ffconcat version 1.0\n");
+    let mut cursor_telemetry = HashMap::new();
+    let mut cursor_zooms = HashMap::new();
+    let mut zoom_spring = ZoomSpring::default();
+    let mut previous_video = None;
     for (index, interval) in boundaries.windows(2).enumerate() {
         check_cancel(cancel)?;
         let [start, end] = [interval[0], interval[1]];
         let segment = Segment::at(tracks, &media, start, end);
+        let current_video = segment.video.map(|clip| clip.id);
+        if previous_video != current_video {
+            zoom_spring = ZoomSpring::default();
+            previous_video = current_video;
+        }
+        let cursor = segment
+            .video
+            .filter(|_| cursor_effect.enabled && start < cursor_effect.end_us && end > cursor_effect.start_us)
+            .and_then(|clip| {
+                let telemetry = cursor_telemetry
+                    .entry(clip.path.as_path())
+                    .or_insert_with(|| CursorTelemetry::for_video(&clip.path))
+                    .as_ref()
+                    .filter(|telemetry| !telemetry.samples.is_empty())?;
+                let zoom = cursor_zooms.entry(clip.id).or_insert_with(|| {
+                    let active = cursor_effect.start_us.saturating_sub(clip.start)
+                        ..cursor_effect.end_us.saturating_sub(clip.start).min(clip.duration());
+                    CursorZoom::new(
+                        telemetry,
+                        clip.source_start..clip.source_end,
+                        clip.speed_milli,
+                        clip.reverse,
+                        active,
+                        cursor_effect,
+                    )
+                });
+                let size = (profile.width, profile.height);
+                let viewport = cursor_viewport(size, size, media[clip.path.as_path()], process.backdrop);
+                Some(CursorRender {
+                    clip,
+                    telemetry,
+                    effect: cursor_effect,
+                    zoom,
+                    viewport,
+                    zoom_spring: &mut zoom_spring,
+                })
+            });
         let filename = format!("part-{index:06}.mov");
-        render_segment(&process, &profile, &segment, &filename)
+        render_segment(&process, &profile, &segment, &filename, cursor)
             .with_context(|| format!("片段 {} 导出失败", index + 1))?;
         let duration = seconds(end - start);
         let _ = write!(manifest_text, "file '{filename}'\nduration {duration}\n");
@@ -520,17 +568,29 @@ struct RenderContext<'a> {
     include_subtitles: bool,
 }
 
+struct CursorRender<'a> {
+    clip: &'a Clip,
+    telemetry: &'a CursorTelemetry,
+    effect: &'a CursorEffect,
+    zoom: &'a CursorZoom,
+    viewport: CursorViewport,
+    zoom_spring: &'a mut ZoomSpring,
+}
+
 fn render_segment(
     process: &RenderContext<'_>,
     profile: &Profile,
     segment: &Segment<'_>,
     filename: &str,
+    cursor: Option<CursorRender<'_>>,
 ) -> Result<()> {
     let mut ffmpeg = command(process.tools);
     let duration = seconds(segment.end - segment.start);
     let width = profile.width;
     let height = profile.height;
-    if let Some(clip) = segment.video {
+    if let Some(cursor) = &cursor {
+        input_cursor_video(&mut ffmpeg, segment, cursor.clip, false)?;
+    } else if let Some(clip) = segment.video {
         input_clip(&mut ffmpeg, segment, clip, false)?;
     } else {
         ffmpeg.args(["-f", "lavfi", "-i"]).arg(format!(
@@ -538,10 +598,6 @@ fn render_segment(
             profile.fps
         ));
     }
-    let audio_map = profile
-        .audio
-        .then(|| audio_mix(&mut ffmpeg, segment, &duration))
-        .transpose()?;
     let mut input_filter = format!("fps={}:start_time=0", profile.fps);
     if let Some(clip) = segment.video {
         if clip.reverse && !super::media::is_still_image(&clip.path) {
@@ -568,6 +624,9 @@ fn render_segment(
         ",tpad=stop_mode=clone:stop_duration={duration}"
     );
     let mut output_filter = String::from("format=yuv420p");
+    if cursor.is_some() {
+        let _ = write!(output_filter, ",fps={}:start_time=0", profile.fps);
+    }
     if process.include_subtitles
         && segment.overlays.write_for_playback(
             process.stage,
@@ -597,11 +656,41 @@ fn render_segment(
             sequence_filter(width, height)
         )
     };
-    ffmpeg.args(["-t", &duration, "-map", "0:V:0"]);
+    if let Some(cursor) = cursor {
+        ffmpeg.args([
+            "-t", &duration, "-map", "0:V:0", "-an", "-filter_threads", "1", "-vf", &video,
+            "-threads:v", "1", "-c:v", "rawvideo", "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1",
+        ]);
+        let mut encode = command(process.tools);
+        encode
+            .args(["-f", "rawvideo", "-pixel_format", "rgba", "-video_size"])
+            .arg(format!("{width}x{height}"))
+            .args(["-framerate", &profile.fps.to_string(), "-i", "pipe:0"]);
+        configure_segment_output(&mut encode, profile, segment, &duration, Some(cursor.clip))?;
+        encode.arg(process.stage.join(filename));
+        return run_cursor_pipeline(&mut ffmpeg, &mut encode, process, profile, segment, cursor);
+    }
+    configure_segment_output(&mut ffmpeg, profile, segment, &duration, None)?;
+    ffmpeg.args(["-vf", &video]).arg(process.stage.join(filename));
+    run(&mut ffmpeg, process.log, process.cancel)
+}
+
+fn configure_segment_output(
+    ffmpeg: &mut Command,
+    profile: &Profile,
+    segment: &Segment<'_>,
+    duration: &str,
+    cursor_video: Option<&Clip>,
+) -> Result<()> {
+    let audio_map = profile
+        .audio
+        .then(|| audio_mix(ffmpeg, segment, duration, cursor_video))
+        .transpose()?;
+    ffmpeg.args(["-t", duration, "-map", "0:V:0"]);
     if let Some(audio_map) = audio_map {
         ffmpeg.args(["-map", audio_map]);
     }
-    ffmpeg.args(["-vf", &video, "-c:v", profile.encoder]);
+    ffmpeg.args(["-c:v", profile.encoder]);
     if profile.encoder == "libx264" {
         ffmpeg.args([
             "-preset",
@@ -619,8 +708,125 @@ fn render_segment(
         ffmpeg.arg("-an");
     }
     ffmpeg.args(["-video_track_timescale", "90000"]);
-    ffmpeg.arg(process.stage.join(filename));
-    run(&mut ffmpeg, process.log, process.cancel)
+    Ok(())
+}
+
+fn run_cursor_pipeline(
+    decode: &mut Command,
+    encode: &mut Command,
+    process: &RenderContext<'_>,
+    profile: &Profile,
+    segment: &Segment<'_>,
+    cursor: CursorRender<'_>,
+) -> Result<()> {
+    check_cancel(process.cancel)?;
+    let decode_log = process.stage.join("ffmpeg-decode.log");
+    decode.stdout(Stdio::piped()).stderr(File::create(&decode_log)?);
+    encode.stdin(Stdio::piped()).stderr(File::create(process.log)?);
+    let mut decoder = decode.spawn().context("无法启动鼠标效果解码进程")?;
+    let mut encoder = match encode.spawn() {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            stop_process(&mut decoder);
+            return Err(error).context("无法启动鼠标效果编码进程");
+        }
+    };
+    let decoded_frames = decoder.stdout.take().expect("piped decoder stdout");
+    let encoded_input = encoder.stdin.take().expect("piped encoder stdin");
+    thread::scope(|scope| {
+        let transfer = scope.spawn(|| {
+            compose_cursor_frames(decoded_frames, encoded_input, profile, segment, cursor, process.cancel)
+        });
+        let result = wait_for_cursor_processes(&mut decoder, &mut encoder, process, &decode_log);
+        if result.is_err() {
+            // Close both pipes by stopping the processes before joining the frame worker.
+            stop_process(&mut decoder);
+            stop_process(&mut encoder);
+        }
+        let transfer_result = transfer.join().expect("cursor frame worker panicked");
+        result.and(transfer_result)
+    })
+}
+
+fn wait_for_cursor_processes(
+    decoder: &mut Child,
+    encoder: &mut Child,
+    process: &RenderContext<'_>,
+    decode_log: &Path,
+) -> Result<()> {
+    loop {
+        check_cancel(process.cancel)?;
+        let decoded = finished_successfully(decoder, decode_log)?;
+        let encoded = finished_successfully(encoder, process.log)?;
+        if decoded && encoded {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(35));
+    }
+}
+
+fn finished_successfully(process: &mut Child, log: &Path) -> Result<bool> {
+    let Some(status) = process.try_wait()? else {
+        return Ok(false);
+    };
+    check_process_status(status, log)?;
+    Ok(true)
+}
+
+fn stop_process(process: &mut Child) {
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
+fn compose_cursor_frames(
+    mut decoded: ChildStdout,
+    mut output: ChildStdin,
+    profile: &Profile,
+    segment: &Segment<'_>,
+    cursor: CursorRender<'_>,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let mut pixels = vec![0; profile.width as usize * profile.height as usize * 4];
+    let mut frame = 0_u64;
+    loop {
+        check_cancel(cancel)?;
+        // A clean EOF is valid only between complete RGBA frames.
+        let received = decoded.read(&mut pixels[..1]).context("无法读取鼠标效果画面")?;
+        if received == 0 {
+            break;
+        }
+        decoded.read_exact(&mut pixels[1..]).context("鼠标效果画面数据不完整")?;
+        let time = segment.start + frame * 1_000_000 / u64::from(profile.fps);
+        let source_elapsed = cursor.clip.source_time_at(time) - cursor.clip.source_start;
+        let source_time = if cursor.clip.reverse {
+            cursor.clip.source_end.saturating_sub(1).saturating_sub(source_elapsed)
+        } else {
+            cursor.clip.source_start + source_elapsed
+        }
+        .clamp(cursor.clip.source_start, cursor.clip.source_end - 1);
+        let sample = cursor.telemetry.sample_at(source_time);
+        let zoom = cursor.zoom.frame(
+            time - cursor.clip.start,
+            sample,
+            cursor.viewport,
+            cursor.zoom_spring,
+            true,
+        );
+        apply_cursor_effect(
+            &mut pixels,
+            profile.width,
+            profile.height,
+            sample,
+            cursor.effect,
+            time,
+            zoom,
+            cursor.viewport,
+        );
+        output.write_all(&pixels).context("无法写入鼠标效果画面")?;
+        frame += 1;
+    }
+    ensure!(frame > 0, "没有可导出的鼠标效果画面");
+    Ok(())
 }
 
 fn input_clip(
@@ -641,7 +847,36 @@ fn input_clip(
     Ok(())
 }
 
-fn audio_mix(command: &mut Command, segment: &Segment<'_>, duration: &str) -> Result<&'static str> {
+fn input_cursor_video(
+    command: &mut Command,
+    segment: &Segment<'_>,
+    clip: &Clip,
+    audio_only: bool,
+) -> Result<()> {
+    if !clip.reverse || super::media::is_still_image(&clip.path) {
+        return input_clip(command, segment, clip, audio_only);
+    }
+    // Limit the source interval before reverse buffers it so a cut never samples a later take.
+    let source_at = |time| {
+        clip.source_end.saturating_sub(clip.source_time_at(time) - clip.source_start)
+    };
+    let start = source_at(segment.end).max(clip.source_start);
+    let duration = source_at(segment.start).saturating_sub(start).max(1);
+    command.args(["-protocol_whitelist", "file,pipe", "-sn", "-dn"]);
+    if audio_only {
+        command.arg("-vn");
+    }
+    command.args(["-t", &seconds(duration)]);
+    append_timed_input(command, &local_media(&clip.path)?, start);
+    Ok(())
+}
+
+fn audio_mix(
+    command: &mut Command,
+    segment: &Segment<'_>,
+    duration: &str,
+    cursor_video: Option<&Clip>,
+) -> Result<&'static str> {
     if segment.audio.is_empty() {
         command.args([
             "-f",
@@ -655,10 +890,14 @@ fn audio_mix(command: &mut Command, segment: &Segment<'_>, duration: &str) -> Re
     let mut input = 1;
     let count = segment.audio.len();
     for (index, clip) in segment.audio.iter().enumerate() {
-        let stream = if segment.video.is_some_and(|video| video.id == clip.id) {
+        let stream = if cursor_video.is_none() && segment.video.is_some_and(|video| video.id == clip.id) {
             0
         } else {
-            input_clip(command, segment, clip, true)?;
+            if cursor_video.is_some_and(|video| video.id == clip.id) {
+                input_cursor_video(command, segment, clip, true)?;
+            } else {
+                input_clip(command, segment, clip, true)?;
+            }
             input += 1;
             input - 1
         };
@@ -735,8 +974,7 @@ fn run(command: &mut Command, log: &Path, cancel: &AtomicBool) -> Result<()> {
         .context("无法启动 FFmpeg")?;
     let status = loop {
         if cancel.load(Ordering::Relaxed) {
-            let _ = process.kill();
-            let _ = process.wait();
+            stop_process(&mut process);
             bail!("已取消导出");
         }
         if let Some(status) = process.try_wait()? {
@@ -744,6 +982,10 @@ fn run(command: &mut Command, log: &Path, cancel: &AtomicBool) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(35));
     };
+    check_process_status(status, log)
+}
+
+fn check_process_status(status: ExitStatus, log: &Path) -> Result<()> {
     if !status.success() {
         let text = fs::read_to_string(log).unwrap_or_default();
         let reason: String = text.trim().chars().take(260).collect();
@@ -807,6 +1049,79 @@ mod tests {
             (1080, 1920)
         );
         assert_eq!(ExportResolution::Hd.dimensions((1920, 1080)), (1280, 720));
+    }
+
+    #[test]
+    #[ignore = "requires local FFmpeg and FFprobe"]
+    fn export_ramps_into_click_zoom_and_returns_to_normal_with_audio() {
+        use crate::editor::cursor_effect::{CursorClickEffect, CursorSample, CursorStyle};
+
+        let tools = MediaTools::discover().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("click.mp4");
+        let cancel = AtomicBool::new(false);
+        let duration = 4_000_000;
+        let mut input = command(&tools);
+        input
+            .args([
+                "-f", "lavfi", "-i", "color=c=lime:s=160x90:r=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                "-vf", "drawbox=x=0:y=0:w=40:h=ih:color=blue:t=fill",
+                "-t", "4", "-c:v", encoder(&tools).unwrap(), "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+            ])
+            .arg(&source);
+        run(&mut input, &temporary.path().join("source.log"), &cancel).unwrap();
+        let mut telemetry = CursorTelemetry::new(160, 90);
+        for (at_us, pressed) in [(0, false), (1_200_000, true), (1_240_000, false)] {
+            telemetry.push(CursorSample { at_us, x: 0.5, y: 0.5, pressed });
+        }
+        fs::write(
+            source.with_extension("mp4.cursor.json"),
+            serde_json::to_vec(&telemetry).unwrap(),
+        )
+        .unwrap();
+        let mut timeline = Timeline::default();
+        timeline.insert_media(source, duration, 0).unwrap();
+        let mut settings = ExportSettings::new(temporary.path());
+        settings.output = temporary.path().join("zoom.mp4");
+        settings.fps = 60;
+        let mut effect = CursorEffect::default_for(duration);
+        effect.zoom_scale = 2.0;
+        effect.click_effect = CursorClickEffect::None;
+        effect.cursor_style = CursorStyle::Coral;
+        export_with_settings(
+            &tools,
+            timeline.tracks(),
+            &settings,
+            CanvasFormat::Original,
+            &BackgroundSettings::default(),
+            &effect,
+            &cancel,
+            |_| {},
+        )
+        .unwrap();
+        let output = &settings.output;
+        let info = tools.probe(output).unwrap();
+        assert!(info.has_video && info.has_audio);
+        assert!(info.duration_us.abs_diff(duration) <= 40_000);
+        let samples = audio_samples(&tools, output, "1.40");
+        assert!(tone(&samples, 440.0) > 0.015);
+        for (position, zoomed) in [("0.10", false), ("0.80", true), ("1.40", true), ("3.80", false)] {
+            let frame = hidden_command(&tools.ffmpeg)
+                .args(["-hide_banner", "-loglevel", "error", "-ss", position, "-i"])
+                .arg(output)
+                .args(["-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(frame.status.success(), "{:?}", frame.stderr);
+            let pixel = (20 * 160 + 27) * 3;
+            let [_, green, blue] = frame.stdout[pixel..pixel + 3] else { unreachable!() };
+            assert_eq!(green > blue, zoomed, "zoom at {position} s: G={green}, B={blue}");
+            assert!(frame.stdout.chunks_exact(3).any(|rgb| {
+                rgb[0] > 170 && rgb[1] > 30 && rgb[1] < 155 && rgb[2] > 30
+            }), "the coral cursor should be visible at {position} s");
+        }
     }
 
     #[test]

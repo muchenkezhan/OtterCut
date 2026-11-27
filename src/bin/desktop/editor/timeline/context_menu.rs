@@ -69,7 +69,7 @@ impl ContextMenu {
         view: Viewport,
         rows: Rows,
         timeline: &Timeline,
-        ignored: Option<egui::Rect>,
+        ignored: &[egui::Rect],
     ) -> Option<Self> {
         let position = ui.input(|input| {
             if input.pointer.primary_down() || input.pointer.primary_released() || !input.focused {
@@ -91,7 +91,7 @@ impl ContextMenu {
             .map_or(position, |transform| transform * position);
         if !ui.clip_rect().contains(pointer)
             || ui.ctx().layer_id_at(position) != Some(ui.layer_id())
-            || ignored.is_some_and(|rect| rect.contains(pointer))
+            || ignored.iter().any(|rect| rect.contains(pointer))
         {
             return None;
         }

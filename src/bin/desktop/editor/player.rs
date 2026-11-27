@@ -6,7 +6,7 @@ use takeseam::editor_timeline::{Clip, Timeline, Track, TrackKind};
 
 use super::background::BackgroundSettings;
 use super::canvas_format::CanvasFormat;
-use super::cursor_effect::{CursorEffect, CursorTelemetry};
+use super::cursor_effect::{CursorEffect, CursorTelemetry, CursorZoom};
 use super::library::Library;
 use super::media::overlays::{Overlays, sequence_size};
 use super::media::{MediaInfo, MediaSlice, MediaTools, Preview, PreviewPlan, PreviewQuality};
@@ -14,10 +14,9 @@ use super::media::{MediaInfo, MediaSlice, MediaTools, Preview, PreviewPlan, Prev
 pub(super) struct Span<'a> {
     key: SpanKey,
     tracks: &'a [Track],
-    cursor_effect: Option<CursorEffect>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 struct SpanKey {
     start: u64,
     end: u64,
@@ -29,6 +28,7 @@ struct SpanKey {
     audio: Vec<Source>,
     overlay_revision: Option<u64>,
     excluded_overlay: Option<u64>,
+    cursor_effect: Option<CursorEffect>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -38,6 +38,7 @@ struct Source {
     on_timeline: u64,
     source_start: u64,
     source_end: u64,
+    duration_us: u64,
     volume_db_tenths: i16,
     fade_in_us: u64,
     fade_out_us: u64,
@@ -53,6 +54,7 @@ impl Source {
             on_timeline: clip.start,
             source_start: clip.source_start,
             source_end: clip.source_end,
+            duration_us: clip.duration(),
             volume_db_tenths: clip.volume_db_tenths,
             fade_in_us: clip.fade_in_us,
             fade_out_us: clip.fade_out_us,
@@ -108,6 +110,7 @@ impl<'a> Span<'a> {
             on_timeline: 0,
             source_start: 0,
             source_end: info.duration_us,
+            duration_us: info.duration_us,
             volume_db_tenths: 0,
             fade_in_us: 0,
             fade_out_us: 0,
@@ -126,9 +129,9 @@ impl<'a> Span<'a> {
                 audio: info.has_audio.then_some(source).into_iter().collect(),
                 overlay_revision: None,
                 excluded_overlay: None,
+                cursor_effect: None,
             },
             tracks: &[],
-            cursor_effect: None,
         }
     }
 
@@ -149,6 +152,7 @@ impl<'a> Span<'a> {
             audio: Vec::new(),
             overlay_revision: None,
             excluded_overlay: None,
+            cursor_effect: None,
         };
         for track in timeline.tracks() {
             if track.kind.is_overlay() {
@@ -190,7 +194,6 @@ impl<'a> Span<'a> {
         Some(Self {
             key,
             tracks: timeline.tracks(),
-            cursor_effect: None,
         })
     }
 
@@ -222,7 +225,7 @@ impl<'a> Span<'a> {
     }
 
     pub(super) fn with_cursor_effect(mut self, effect: &CursorEffect) -> Self {
-        self.cursor_effect = Some(effect.clone());
+        self.key.cursor_effect = Some(effect.clone());
         self
     }
 
@@ -239,9 +242,9 @@ impl<'a> Span<'a> {
                 audio: Vec::new(),
                 overlay_revision: None,
                 excluded_overlay: None,
+                cursor_effect: None,
             },
             tracks: &[],
-            cursor_effect: None,
         }
     }
 
@@ -308,11 +311,36 @@ impl<'a> Span<'a> {
                 }
             }
         }
+        let effect = key
+            .cursor_effect
+            .clone()
+            .unwrap_or_else(|| CursorEffect::default_for(key.end));
         let cursor = key.video.as_ref().and_then(|source| {
-            let path = PathBuf::from(format!("{}.cursor.json", source.path.display()));
-            path.is_file()
-                .then(|| CursorTelemetry::load(&path).ok())
-                .flatten()
+            let telemetry = CursorTelemetry::for_video(&source.path)?;
+            let active_start = effect.start_us.saturating_sub(source.on_timeline);
+            let active_end = effect.end_us.saturating_sub(source.on_timeline).min(source.duration_us);
+            let source_range = source.source_start..source.source_end;
+            let zoom = CursorZoom::new(
+                &telemetry,
+                source_range.clone(),
+                source.speed_milli,
+                source.reverse,
+                active_start..active_end,
+                &effect,
+            );
+            let media = source_info?;
+            let [raster_width, raster_height] = quality.raster_size(size);
+            Some(super::media::PreviewCursor {
+                telemetry,
+                source_range,
+                viewport: super::media::cursor_viewport(
+                    (raster_width as u32, raster_height as u32),
+                    size,
+                    media,
+                    &key.background,
+                ),
+                zoom,
+            })
         });
         let from = position.min(key.end.saturating_sub(1));
         let excluded_overlay = if playing { None } else { key.excluded_overlay };
@@ -331,10 +359,7 @@ impl<'a> Span<'a> {
             overlays: Overlays::in_range_excluding(self.tracks, from..key.end, excluded_overlay),
             excluded_overlay,
             cursor,
-            cursor_effect: self
-                .cursor_effect
-                .clone()
-                .unwrap_or_else(|| CursorEffect::default_for(key.end)),
+            cursor_effect: effect,
         }))
     }
 
@@ -445,6 +470,7 @@ impl SpanKey {
             && self.video == other.video
             && self.overlay_revision == other.overlay_revision
             && self.excluded_overlay == other.excluded_overlay
+            && self.cursor_effect == other.cursor_effect
             && self.audio.len() == other.audio.len()
             && self
                 .audio
@@ -761,6 +787,22 @@ impl Player {
         if requested {
             return self.active.as_ref()?.error.clone();
         }
+        // Audio and hidden video cuts can restart the decoder for the same visible clip.
+        let zoom_spring = self
+            .active
+            .as_ref()
+            .filter(|active| {
+                active.playing
+                    && self.playing
+                    && active.span.end == position
+                    && active.span.end == span.key.start
+                    && active.span.video == span.key.video
+                    && active.span.cursor_effect == span.key.cursor_effect
+                    && active.span.background == span.key.background
+                    && active.span.canvas_format == span.key.canvas_format
+                    && active.quality == self.quality
+            })
+            .and_then(|_| self.preview.zoom_spring());
         if changed {
             let keep_picture = self.active.as_ref().is_some_and(|active| {
                 (span.key.video.is_some()
@@ -825,7 +867,7 @@ impl Player {
                             self.preview.set_live_volume(source_id, target - base);
                         }
                     } else {
-                        self.preview.start(tools, ctx, plan, self.playing);
+                        self.preview.start(tools, ctx, plan, self.playing, zoom_spring);
                         if self.scrubbing {
                             self.last_scrub_preview = Some(Instant::now());
                         }

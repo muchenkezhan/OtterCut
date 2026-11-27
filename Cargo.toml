@@ -24,6 +24,7 @@ cpal = "0.17.3"
 ctrlc = "3.5"
 eframe = { version = "0.34.1", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 fast_image_resize = "6.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 rfd = "0.15.4"
 serde_json = "1"
 tempfile = "3"
@@ -48,3 +49,11 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-capture = "2.0.1"
+
+# The resizer's generic pixel loops are compiled in its caller as well.
+# Keep zoom preview within the frame budget in development builds.
+[profile.dev.package.takeseam]
+opt-level = 2
+
+[profile.dev.package.fast_image_resize]
+opt-level = 3

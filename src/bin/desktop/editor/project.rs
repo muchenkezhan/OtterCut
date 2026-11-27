@@ -335,6 +335,35 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_keeps_custom_cursor_zoom_timing() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("鼠标放大动画.takeproj");
+        let timeline = Timeline::default();
+        let mut cursor_effect = CursorEffect::default_for(1_000_000);
+        cursor_effect.zoom_scale = 2.2;
+        cursor_effect.zoom_transition_us = Some(875_000);
+        cursor_effect.zoom_hold_us = 1_850_000;
+        cursor_effect.zoom_pan_us = 425_000;
+
+        save_with_cursor(
+            &project,
+            &timeline,
+            0,
+            CanvasFormat::Original,
+            &BackgroundSettings::default(),
+            &cursor_effect,
+            &[],
+        )
+        .unwrap();
+
+        let (_, _, _, _, loaded_effect, _) = load_with_cursor(&project).unwrap();
+        assert_eq!(loaded_effect.zoom_scale, 2.2);
+        assert_eq!(loaded_effect.zoom_transition_us, Some(875_000));
+        assert_eq!(loaded_effect.zoom_hold_us, 1_850_000);
+        assert_eq!(loaded_effect.zoom_pan_us, 425_000);
+    }
+
+    #[test]
     fn opens_a_legacy_single_track_project_on_v1() {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("legacy.takeproj");

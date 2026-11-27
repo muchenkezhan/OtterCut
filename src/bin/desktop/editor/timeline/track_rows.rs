@@ -10,7 +10,7 @@ use crate::ui_theme::{self, Palette};
 use super::canvas::{TRACK_HEIGHT, Viewport};
 use super::edge_drop::TrackGap;
 use super::gesture::Gesture;
-use super::{ClipLane, TimelineView, material_drop};
+use super::{ClipLane, CursorEffect, TimelineView, material_drop};
 
 pub(super) const VERTICAL_SCROLL_WIDTH: f32 = 14.0;
 const TEXT_TRACK_HEIGHT: f32 = 32.0;
@@ -274,6 +274,8 @@ impl TimelineView {
         selected: &mut Option<u64>,
         view: Viewport,
         rows: Rows,
+        playhead: &mut u64,
+        cursor_effect: &mut CursorEffect,
     ) -> (Option<TrackAction>, Option<(u64, u64)>) {
         let colors = ui_theme::palette(ui.ctx());
         let all = painter.with_clip_rect(rows.area);
@@ -345,9 +347,28 @@ impl TimelineView {
                 action = Some(input);
             }
             for clip in &track.clips {
+                let mut clip_rect = rect;
+                if track.kind == TrackKind::Video
+                    && let Some(markers) = self.cursor_track_for(clip.id).map(<[u64]>::to_vec)
+                {
+                    self.draw_cursor_track_for_clip(
+                        ui,
+                        &media,
+                        view,
+                        rect,
+                        clip,
+                        &markers,
+                        timeline.duration(),
+                        playhead,
+                        selected,
+                        cursor_effect,
+                        &colors,
+                    );
+                    clip_rect.min.y += super::CURSOR_TRACK_HEIGHT;
+                }
                 let lane = ClipLane {
                     view,
-                    rect,
+                    rect: clip_rect,
                     id: track.id,
                     kind: track.kind,
                     enabled: track.enabled,

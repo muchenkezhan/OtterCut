@@ -58,8 +58,19 @@ const MIN_HORIZON: u64 = 10_000_000;
 const TRAILING_SPACE: u64 = 3_000_000;
 const TRACK_HEADER: f32 = 72.0;
 const SCROLLBAR_HEIGHT: f32 = 16.0;
-const CURSOR_TRACK_HEIGHT: f32 = 32.0;
-const CURSOR_TRACK_GAP: f32 = 5.0;
+const CURSOR_TRACK_HEIGHT: f32 = 18.0;
+
+fn cursor_track_rect(view: Viewport, row: Rect, clip: &Clip) -> Option<Rect> {
+    let left = view.x(clip.start);
+    let right = view.x(clip.end()).max(left + 1.0);
+    let lane = Rect::from_min_max(
+        pos2(left, row.top()),
+        pos2(right, row.top() + CURSOR_TRACK_HEIGHT),
+    )
+    .intersect(row)
+    .intersect(view.rect);
+    lane.is_positive().then_some(lane)
+}
 
 #[derive(Default)]
 pub struct TimelineView {
@@ -81,8 +92,7 @@ pub struct TimelineView {
     context_menu: Option<ContextMenu>,
     volume_changed: bool,
     volume_preview: Option<(u64, i16)>,
-    cursor_markers: Vec<u64>,
-    cursor_track_available: bool,
+    cursor_tracks: Vec<CursorTrackData>,
     cursor_track_selected: bool,
     cursor_drag: Option<CursorEffectDrag>,
     user_markers: Vec<u64>,
@@ -110,6 +120,12 @@ pub(super) struct TimelineInput {
     pub recognize_audio_track: Option<TrackId>,
     pub playhead_seek: bool,
     pub playhead_seek_finished: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CursorTrackData {
+    pub clip_id: u64,
+    pub markers: Vec<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -188,13 +204,12 @@ impl TimelineView {
         self.reveal_track = Some(id);
     }
 
-    pub(super) fn set_cursor_markers(&mut self, markers: &[u64], available: bool) {
-        if self.cursor_markers.as_slice() != markers {
-            self.cursor_markers.clear();
-            self.cursor_markers.extend_from_slice(markers);
+    pub(super) fn set_cursor_tracks(&mut self, tracks: &[CursorTrackData]) {
+        if self.cursor_tracks != tracks {
+            self.cursor_tracks.clear();
+            self.cursor_tracks.extend_from_slice(tracks);
         }
-        self.cursor_track_available = available;
-        if !available {
+        if tracks.is_empty() {
             self.cursor_track_selected = false;
             self.cursor_drag = None;
         }
@@ -202,6 +217,13 @@ impl TimelineView {
 
     pub(super) fn cursor_track_selected(&self) -> bool {
         self.cursor_track_selected
+    }
+
+    fn cursor_track_for(&self, clip_id: u64) -> Option<&[u64]> {
+        self.cursor_tracks
+            .iter()
+            .find(|track| track.clip_id == clip_id)
+            .map(|track| track.markers.as_slice())
     }
 
     pub(super) fn set_user_markers(&mut self, markers: Vec<u64>) {
@@ -548,12 +570,7 @@ fn transition_exit_at<'a>(
         cursor_effect: &mut CursorEffect,
     ) -> Result<Option<MaterialDrop>, TimelineError> {
         let height = ui.available_height();
-        let cursor_band = if self.cursor_track_available {
-            CURSOR_TRACK_HEIGHT + CURSOR_TRACK_GAP
-        } else {
-            0.0
-        };
-        let track_space = height - RULER_HEIGHT - SCROLLBAR_HEIGHT - cursor_band;
+        let track_space = height - RULER_HEIGHT - SCROLLBAR_HEIGHT;
         if track_space <= 20.0 {
             return Ok(None);
         }
@@ -581,7 +598,7 @@ fn transition_exit_at<'a>(
         let edge_band = ((track_space - track_height) * 0.5).max(6.0);
         let mut rows = Rows {
             area: Rect::from_min_max(
-                pos2(rect.left(), content.top() + RULER_HEIGHT + cursor_band),
+                pos2(rect.left(), content.top() + RULER_HEIGHT),
                 content.max,
             ),
             edge_band,
@@ -635,6 +652,7 @@ fn transition_exit_at<'a>(
             scale: self.scale(),
             scroll: self.scroll,
         };
+        let cursor_lanes = self.cursor_track_rects(timeline, view, rows);
         if transition_drag {
             self.handle_transition_drop(ui, view, rows, timeline);
         }
@@ -644,14 +662,13 @@ fn transition_exit_at<'a>(
             view,
             rows,
             selected,
-            self.cursor_track_rect(rows),
+            &cursor_lanes,
             !dragging && !material_drag && !transition_drag && self.mode == Mode::Select,
         );
         let colors = ui_theme::palette(ui.ctx());
         let painter = ui.painter_at(rect);
-        let cursor_lane = self.cursor_track_rect(rows);
         self.playhead_seek = if !dragging && !selecting && self.cursor_drag.is_none() {
-            self.seek_on_canvas(ui, view, timeline.duration(), playhead, cursor_lane)
+            self.seek_on_canvas(ui, view, timeline.duration(), playhead, &cursor_lanes)
         } else {
             PlayheadSeek::default()
         };
@@ -700,17 +717,16 @@ fn transition_exit_at<'a>(
         rows.offset = self.vertical_scroll;
         let time_painter = painter.with_clip_rect(content);
         paint_ruler(&time_painter, view, rows.area, background, &colors);
-        self.draw_cursor_track(
+        let (track_action, cut) = self.draw_rows(
             ui,
             &painter,
+            timeline,
+            selected,
             view,
             rows,
-            timeline.duration(),
             playhead,
-            selected,
             cursor_effect,
         );
-        let (track_action, cut) = self.draw_rows(ui, &painter, timeline, selected, view, rows);
         self.marquee.paint(&time_painter, &colors);
         edge_drop::describe_edges(ui, rows);
         paint_playhead(&painter, view, *playhead, &colors);
@@ -745,7 +761,7 @@ fn transition_exit_at<'a>(
             context_menu::close(ui);
             self.context_menu = None;
         } else {
-            let opening = ContextMenu::at_release(ui, view, rows, timeline, cursor_lane);
+            let opening = ContextMenu::at_release(ui, view, rows, timeline, &cursor_lanes);
             if let Some(menu) = opening {
                 self.context_menu = Some(menu);
             }
@@ -812,90 +828,61 @@ fn transition_exit_at<'a>(
         Ok(None)
     }
 
-    fn cursor_track_rect(&self, rows: Rows) -> Option<Rect> {
-        if !self.cursor_track_available {
-            return None;
+    fn cursor_track_rects(&self, timeline: &Timeline, view: Viewport, rows: Rows) -> Vec<Rect> {
+        let mut lanes = Vec::new();
+        for (index, track) in timeline.tracks().iter().enumerate() {
+            if track.kind != TrackKind::Video {
+                continue;
+            }
+            let row = rows.rect(view, index);
+            for clip in &track.clips {
+                if self.cursor_track_for(clip.id).is_some()
+                    && let Some(lane) = cursor_track_rect(view, row, clip)
+                {
+                    lanes.push(lane);
+                }
+            }
         }
-        let bottom = rows.area.top() - CURSOR_TRACK_GAP;
-        let lane = Rect::from_min_size(
-            pos2(rows.area.left() + 6.0, bottom - CURSOR_TRACK_HEIGHT),
-            vec2((rows.area.width() - 12.0).max(0.0), CURSOR_TRACK_HEIGHT),
-        );
-        lane.is_positive().then_some(lane)
+        lanes
     }
 
-    fn draw_cursor_track(
+    fn draw_cursor_track_for_clip(
         &mut self,
         ui: &Ui,
         painter: &egui::Painter,
         view: Viewport,
-        rows: Rows,
+        row: Rect,
+        clip: &Clip,
+        markers: &[u64],
         duration: u64,
         playhead: &mut u64,
         selected: &mut Option<u64>,
         cursor_effect: &mut CursorEffect,
+        colors: &Palette,
     ) {
-        let Some(lane) = self.cursor_track_rect(rows) else {
+        let Some(lane) = cursor_track_rect(view, row, clip) else {
             return;
         };
-        let colors = ui_theme::palette(ui.ctx());
-        let header = Rect::from_min_max(lane.min, pos2(view.rect.left(), lane.bottom()));
-        let body = Rect::from_min_max(pos2(view.rect.left(), lane.top()), lane.max);
-        painter.rect_filled(lane, 5.0, colors.surface.gamma_multiply(0.88));
-        painter.rect_stroke(
+
+        let lane_response = ui.interact(
             lane,
-            5.0,
-            Stroke::new(1.0_f32, colors.border),
-            StrokeKind::Inside,
-        );
-        painter.rect_filled(header.shrink(2.0), 4.0, colors.control);
-        Icon::ClickFollow.paint_scaled(
-            painter,
-            pos2(header.left() + 15.0, header.center().y),
-            colors.accent,
-            0.78,
-        );
-        painter.text(
-            pos2(header.left() + 27.0, header.center().y),
-            Align2::LEFT_CENTER,
-            "鼠标轨道",
-            FontId::proportional(10.5),
-            if self.cursor_track_selected {
-                colors.accent
-            } else {
-                colors.text
-            },
-        );
-        let header_response = ui.interact(
-            header,
-            ui.id().with("cursor-track-header"),
+            ui.id().with(("cursor-track", clip.id)),
             Sense::click(),
         );
-        if header_response.clicked() {
+        lane_response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                true,
+                self.cursor_track_selected,
+                "鼠标轨道",
+            )
+        });
+        if lane_response.clicked() {
             self.cursor_track_selected = true;
             *selected = None;
             self.marquee.clear();
         }
 
-        let body_response = ui.interact(
-            body,
-            ui.id().with("cursor-track-background"),
-            Sense::click(),
-        );
-        if body_response.clicked()
-            && let Some(pointer) = body_response.interact_pointer_pos()
-        {
-            self.cursor_track_selected = true;
-            *selected = None;
-            self.marquee.clear();
-            *playhead = view.time_at(pointer.x).min(duration);
-        }
-
-        let duration = duration.max(1);
-        cursor_effect.start_us = cursor_effect.start_us.min(duration - 1);
-        cursor_effect.end_us = cursor_effect
-            .end_us
-            .clamp(cursor_effect.start_us + 1, duration);
         if let Some(drag) = self.cursor_drag
             && let Some(pointer) = ui.input(|input| input.pointer.interact_pos())
         {
@@ -924,100 +911,105 @@ fn transition_exit_at<'a>(
             self.cursor_track_selected = true;
         }
 
-        let start_x = view.x(cursor_effect.start_us);
-        let end_x = view.x(cursor_effect.end_us);
-        let visible_range = Rect::from_min_max(
-            pos2(start_x.min(end_x - 1.0), body.top() + 4.0),
-            pos2(start_x.max(end_x).max(start_x + 1.0), body.bottom() - 4.0),
-        )
-        .intersect(body);
-        if visible_range.is_positive() {
-            let range_color = if cursor_effect.enabled {
-                colors.accent.gamma_multiply(0.24)
-            } else {
-                colors.control
-            };
-            painter.rect_filled(visible_range, 4.0, range_color);
-            painter.rect_stroke(
-                visible_range,
-                4.0,
-                Stroke::new(
-                    if self.cursor_track_selected { 1.5_f32 } else { 1.0_f32 },
-                    if self.cursor_track_selected {
-                        colors.accent
+        let track_painter = painter.with_clip_rect(lane);
+        track_painter.rect_filled(lane, 2.0, colors.control.gamma_multiply(0.58));
+        track_painter.rect_stroke(
+            lane,
+            2.0,
+            Stroke::new(1.0_f32, colors.border.gamma_multiply(0.75)),
+            StrokeKind::Inside,
+        );
+        Icon::ClickFollow.paint_scaled(
+            &track_painter,
+            pos2(lane.left() + 9.0, lane.center().y),
+            colors.accent,
+            0.55,
+        );
+
+        let range_start = cursor_effect.start_us.max(clip.start);
+        let range_end = cursor_effect.end_us.min(clip.end());
+        if range_start < range_end {
+            let range = Rect::from_min_max(
+                pos2(view.x(range_start), lane.top() + 2.0),
+                pos2(view.x(range_end).max(view.x(range_start) + 1.0), lane.bottom() - 2.0),
+            )
+            .intersect(lane);
+            if range.is_positive() {
+                track_painter.rect_filled(
+                    range,
+                    2.0,
+                    if cursor_effect.enabled {
+                        colors.accent.gamma_multiply(0.24)
                     } else {
-                        colors.accent.gamma_multiply(0.55)
+                        colors.control.gamma_multiply(0.8)
                     },
-                ),
-                StrokeKind::Inside,
-            );
-            if visible_range.width() >= 75.0 {
-                painter.text(
-                    pos2(visible_range.left() + 7.0, visible_range.center().y),
-                    Align2::LEFT_CENTER,
-                    "鼠标效果",
-                    FontId::proportional(10.0),
-                    colors.text,
                 );
-            }
-            let range_response = ui.interact(
-                visible_range,
-                ui.id().with("cursor-effect-range"),
-                Sense::click_and_drag(),
-            );
-            if range_response.clicked() {
-                self.cursor_track_selected = true;
-                *selected = None;
-                self.marquee.clear();
-            }
-            if range_response.drag_started()
-                && let Some(pointer) = ui
-                    .input(|input| input.pointer.press_origin())
-                    .or_else(|| range_response.interact_pointer_pos())
-            {
-                self.cursor_drag = Some(CursorEffectDrag {
-                    kind: CursorEffectDragKind::Move,
-                    origin: view.time_at(pointer.x),
-                    start_us: cursor_effect.start_us,
-                    end_us: cursor_effect.end_us,
-                });
-                self.cursor_track_selected = true;
-                *selected = None;
-                self.marquee.clear();
-            }
-            if range_response.drag_stopped() {
-                self.cursor_drag = None;
+                track_painter.rect_stroke(
+                    range,
+                    2.0,
+                    Stroke::new(
+                        if self.cursor_track_selected { 1.5_f32 } else { 1.0_f32 },
+                        if self.cursor_track_selected {
+                            colors.accent
+                        } else {
+                            colors.accent.gamma_multiply(0.6)
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                let response = ui.interact(
+                    range,
+                    ui.id().with(("cursor-effect-range", clip.id)),
+                    Sense::click_and_drag(),
+                );
+                if response.clicked() || response.drag_started() {
+                    self.cursor_track_selected = true;
+                    *selected = None;
+                    self.marquee.clear();
+                }
+                if response.drag_started()
+                    && let Some(pointer) = ui
+                        .input(|input| input.pointer.press_origin())
+                        .or_else(|| response.interact_pointer_pos())
+                {
+                    self.cursor_drag = Some(CursorEffectDrag {
+                        kind: CursorEffectDragKind::Move,
+                        origin: view.time_at(pointer.x),
+                        start_us: cursor_effect.start_us,
+                        end_us: cursor_effect.end_us,
+                    });
+                }
+                if response.drag_stopped() {
+                    self.cursor_drag = None;
+                }
             }
         }
 
-        for &marker in &self.cursor_markers {
-            let x = view.x(marker);
-            if !body.x_range().contains(x) {
+        for &marker in markers {
+            if marker < clip.start || marker >= clip.end() {
                 continue;
             }
-            let marker_area = Rect::from_center_size(
-                pos2(x, body.center().y),
-                vec2(9.0, body.height()),
-            );
+            let x = view.x(marker);
+            let marker_area = Rect::from_center_size(pos2(x, lane.center().y), vec2(7.0, lane.height()));
             let response = ui
                 .interact(
-                    marker_area,
-                    ui.id().with(("cursor-click", marker)),
+                    marker_area.intersect(lane),
+                    ui.id().with(("cursor-click", clip.id, marker)),
                     Sense::click(),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
-                .on_hover_text(format!("点击事件 · {}", timecode(marker)));
+                .on_hover_text(format!("鼠标点击 · {}", timecode(marker)));
             let color = if cursor_effect.contains(marker) {
                 colors.accent
             } else {
                 colors.muted
             };
-            painter.vline(
+            track_painter.vline(
                 x,
-                body.top() + 4.0..=body.bottom() - 4.0,
-                Stroke::new(1.0_f32, color.gamma_multiply(0.62)),
+                lane.top() + 3.0..=lane.bottom() - 3.0,
+                Stroke::new(1.0_f32, color.gamma_multiply(0.76)),
             );
-            painter.circle_filled(pos2(x, body.center().y), 3.0, color);
+            track_painter.circle_filled(pos2(x, lane.center().y), 2.5, color);
             if response.clicked() {
                 self.cursor_track_selected = true;
                 *selected = None;
@@ -1026,31 +1018,29 @@ fn transition_exit_at<'a>(
             }
         }
 
-        for (is_start, time) in [
+
+        for (is_start, edge_time) in [
             (true, cursor_effect.start_us),
             (false, cursor_effect.end_us),
         ] {
-            let x = view.x(time);
-            if !body.x_range().contains(x) {
+            if edge_time < clip.start || edge_time > clip.end() {
                 continue;
             }
-            let handle = Rect::from_min_max(
-                pos2(x - 5.0, body.top() + 2.0),
-                pos2(x + 5.0, body.bottom() - 2.0),
-            )
-            .intersect(body);
+            let x = view.x(edge_time);
+            let handle = Rect::from_center_size(pos2(x, lane.center().y), vec2(8.0, lane.height()))
+                .intersect(lane);
             if !handle.is_positive() {
                 continue;
             }
             let response = ui
                 .interact(
                     handle,
-                    ui.id().with(("cursor-effect-edge", is_start)),
+                    ui.id().with(("cursor-effect-edge", clip.id, is_start)),
                     Sense::click_and_drag(),
                 )
                 .on_hover_cursor(CursorIcon::ResizeHorizontal);
             if response.hovered() || response.dragged() {
-                painter.vline(x, handle.y_range(), Stroke::new(2.0_f32, colors.text));
+                track_painter.vline(x, handle.y_range(), Stroke::new(1.5_f32, colors.text));
             }
             if response.drag_started()
                 && let Some(pointer) = ui
@@ -1076,24 +1066,6 @@ fn transition_exit_at<'a>(
             }
         }
 
-        for &marker in &self.user_markers {
-            let x = view.x(marker);
-            if !body.x_range().contains(x) {
-                continue;
-            }
-            let center = pos2(x, body.top() + 7.0);
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    pos2(center.x, center.y - 4.0),
-                    pos2(center.x + 3.5, center.y),
-                    pos2(center.x, center.y + 4.0),
-                    pos2(center.x - 3.5, center.y),
-                ],
-                colors.recording,
-                Stroke::NONE,
-            ));
-        }
-
         if ui.input(|input| input.pointer.primary_released()) {
             self.cursor_drag = None;
         }
@@ -1105,14 +1077,12 @@ fn transition_exit_at<'a>(
         view: Viewport,
         duration: u64,
         playhead: &mut u64,
-        ignored: Option<Rect>,
+        ignored: &[Rect],
     ) -> PlayheadSeek {
         let response = ui.interact(view.rect, ui.id().with("seek"), Sense::click_and_drag());
-        let ignored_pointer = ignored.is_some_and(|rect| {
-            response
-                .interact_pointer_pos()
-                .is_some_and(|pointer| rect.contains(pointer))
-        });
+        let ignored_pointer = response
+            .interact_pointer_pos()
+            .is_some_and(|pointer| ignored.iter().any(|rect| rect.contains(pointer)));
         let active = !ignored_pointer
             && (response.is_pointer_button_down_on() || response.dragged());
         let finished = !ignored_pointer && (response.clicked() || response.drag_stopped());
@@ -1916,22 +1886,20 @@ mod transition_cut_tests {
 #[cfg(test)]
 mod cursor_track_interaction_tests {
     use super::*;
+    use std::path::PathBuf;
+    use takeseam::editor_timeline::Timeline;
 
     fn frame(
         ctx: &egui::Context,
         view: &mut TimelineView,
+        clip: &Clip,
+        row: Rect,
+        markers: &[u64],
         effect: &mut CursorEffect,
         playhead: &mut u64,
         selected: &mut Option<u64>,
         events: Vec<egui::Event>,
     ) {
-        let boundaries = [];
-        let rows = Rows {
-            area: Rect::from_min_size(pos2(0.0, 100.0), vec2(900.0, 100.0)),
-            edge_band: 0.0,
-            offset: 0.0,
-            boundaries: &boundaries,
-        };
         let viewport = Viewport {
             rect: Rect::from_min_max(pos2(72.0, 0.0), pos2(900.0, 100.0)),
             scale: 100.0,
@@ -1946,15 +1914,19 @@ mod cursor_track_interaction_tests {
             },
             |ui| {
                 let painter = ui.painter_at(screen);
-                view.draw_cursor_track(
+                let colors = ui_theme::palette(ui.ctx());
+                view.draw_cursor_track_for_clip(
                     ui,
                     &painter,
                     viewport,
-                    rows,
+                    row,
+                    clip,
+                    markers,
                     10_000_000,
                     playhead,
                     selected,
                     effect,
+                    &colors,
                 );
             },
         );
@@ -1964,16 +1936,28 @@ mod cursor_track_interaction_tests {
     fn trim_handle_wins_over_a_click_marker_and_tracks_the_pointer_from_press() {
         let ctx = egui::Context::default();
         let mut view = TimelineView::default();
-        view.set_cursor_markers(&[1_000_000], true);
+        let clip = Clip {
+            id: 7,
+            path: PathBuf::from("recording.mp4"),
+            media_duration: 10_000_000,
+            source_start: 0,
+            source_end: 10_000_000,
+            start: 0,
+            volume_db_tenths: 0,
+            fade_in_us: 0,
+            fade_out_us: 0,
+            transition_in: None,
+            speed_milli: 1000,
+            reverse: false,
+            timeline_duration_us: 0,
+            group_id: None,
+            text: None,
+        };
+        let row = Rect::from_min_size(pos2(72.0, 70.0), vec2(828.0, 60.0));
+        let markers = [1_000_000];
         let mut effect = CursorEffect {
-            id: 1,
             start_us: 1_000_000,
-            end_us: 5_000_000,
-            enabled: true,
-            cursor_scale: 1.0,
-            zoom_scale: 1.6,
-            smoothing: 0.7,
-            click_effect: super::super::cursor_effect::CursorClickEffect::Ring,
+            ..CursorEffect::default_for(5_000_000)
         };
         let mut playhead = 0;
         let mut selected = Some(7);
@@ -1987,10 +1971,13 @@ mod cursor_track_interaction_tests {
             modifiers: egui::Modifiers::NONE,
         };
 
-        frame(&ctx, &mut view, &mut effect, &mut playhead, &mut selected, vec![]);
+        frame(&ctx, &mut view, &clip, row, &markers, &mut effect, &mut playhead, &mut selected, vec![]);
         frame(
             &ctx,
             &mut view,
+            &clip,
+            row,
+            &markers,
             &mut effect,
             &mut playhead,
             &mut selected,
@@ -1999,6 +1986,9 @@ mod cursor_track_interaction_tests {
         frame(
             &ctx,
             &mut view,
+            &clip,
+            row,
+            &markers,
             &mut effect,
             &mut playhead,
             &mut selected,
@@ -2007,6 +1997,9 @@ mod cursor_track_interaction_tests {
         frame(
             &ctx,
             &mut view,
+            &clip,
+            row,
+            &markers,
             &mut effect,
             &mut playhead,
             &mut selected,
@@ -2015,6 +2008,9 @@ mod cursor_track_interaction_tests {
         frame(
             &ctx,
             &mut view,
+            &clip,
+            row,
+            &markers,
             &mut effect,
             &mut playhead,
             &mut selected,
@@ -2025,6 +2021,52 @@ mod cursor_track_interaction_tests {
         assert_eq!(effect.end_us, 5_000_000);
         assert_eq!(playhead, 0);
         assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn cursor_lanes_follow_only_video_clips_with_cursor_data() {
+        let mut timeline = Timeline::default();
+        let first = timeline
+            .insert_media(PathBuf::from("first.mp4"), 1_000_000, 0)
+            .unwrap();
+        let second = timeline
+            .insert_media(PathBuf::from("second.mp4"), 1_000_000, 1_000_000)
+            .unwrap();
+        let third = timeline
+            .insert_media(PathBuf::from("third.mp4"), 1_000_000, 2_000_000)
+            .unwrap();
+        let mut view = TimelineView::default();
+        view.set_cursor_tracks(&[
+            CursorTrackData {
+                clip_id: first,
+                markers: Vec::new(),
+            },
+            CursorTrackData {
+                clip_id: second,
+                markers: vec![1_500_000],
+            },
+        ]);
+        let boundaries = Rows::measure(&timeline);
+        let rows = Rows {
+            area: Rect::from_min_size(pos2(0.0, 100.0), vec2(900.0, 300.0)),
+            edge_band: 0.0,
+            offset: 0.0,
+            boundaries: &boundaries,
+        };
+        let viewport = Viewport {
+            rect: Rect::from_min_max(pos2(72.0, 0.0), pos2(900.0, 300.0)),
+            scale: 100.0,
+            scroll: 0.0,
+        };
+
+        let lanes = view.cursor_track_rects(&timeline, viewport, rows);
+
+        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes[0].left(), viewport.x(0));
+        assert_eq!(lanes[1].left(), viewport.x(1_000_000));
+        assert_eq!(lanes[0].top(), rows.rect(viewport, 1).top());
+        assert_eq!(lanes[1].top(), rows.rect(viewport, 1).top());
+        assert_eq!(view.cursor_track_for(third), None);
     }
 }
 

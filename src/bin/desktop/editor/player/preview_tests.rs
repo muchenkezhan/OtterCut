@@ -11,6 +11,48 @@ use super::super::media::hidden_command;
 use super::*;
 
 #[test]
+#[ignore = "requires local FFmpeg and FFprobe"]
+fn changing_cursor_theme_redraws_the_preview_at_the_same_playhead() {
+    use crate::editor::cursor_effect::{CursorSample, CursorStyle};
+
+    let tools = MediaTools::discover().unwrap();
+    let fixture = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut library = Library::new(fixture.path().to_owned(), None, &ctx);
+    let path = fixture.path().join("capture.mp4");
+    let info = color_fixture(&tools, &path, "blue", "640x360");
+    let mut telemetry = CursorTelemetry::new(640, 360);
+    telemetry.push(CursorSample {
+        at_us: 0,
+        x: 0.5,
+        y: 0.5,
+        pressed: false,
+    });
+    let telemetry_path = path.with_file_name("capture.mp4.cursor.json");
+    std::fs::write(telemetry_path, serde_json::to_vec(&telemetry).unwrap()).unwrap();
+    let mut timeline = Timeline::default();
+    timeline
+        .insert_media(path.clone(), info.duration_us, 0)
+        .unwrap();
+    library.add_fixture(path, info);
+
+    let mut player = Player::default();
+    let mut position = 200_000;
+    let mut effect = CursorEffect::default_for(timeline.duration());
+    let mut frame = |style| {
+        effect.cursor_style = style;
+        let span = Span::at(&timeline, position).map(|span| span.with_cursor_effect(&effect));
+        assert_eq!(player.sync(&ctx, Some(&tools), span, &mut library, position), None);
+        wait_for_preview(&ctx, &mut player, &mut position, timeline.duration())
+    };
+    let ImageData::Color(default) = frame(CursorStyle::Default);
+    let ImageData::Color(prism) = frame(CursorStyle::Prism);
+
+    assert_eq!(position, 200_000);
+    assert_ne!(default.pixels, prism.pixels);
+}
+
+#[test]
 fn clip_volume_changes_the_preview_span_without_changing_its_source() {
     let mut timeline = Timeline::default();
     let path = PathBuf::from("voice.wav");

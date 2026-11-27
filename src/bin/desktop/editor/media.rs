@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::io::{BufReader, Read, Seek};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -14,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use eframe::egui;
+use fast_image_resize::images::{Image, ImageRef};
+use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use serde_json::Value;
 use takeseam::PRODUCT_NAME;
 
@@ -26,6 +29,10 @@ pub(super) mod overlays;
 
 use audio::{AudioDecode, ScrubAudio};
 use overlays::{DEFAULT_CANVAS, Overlays, SCRIPT_NAME, VIDEO_FPS};
+use super::cursor_effect::{
+    CursorClickEffect, CursorEffect, CursorSample, CursorSprite, CursorTelemetry, CursorZoom,
+    ZoomFrame, ZoomSpring,
+};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -722,7 +729,7 @@ impl PreviewQuality {
         }
     }
 
-    fn raster_size(self, (width, height): (u32, u32)) -> [usize; 2] {
+    pub(super) fn raster_size(self, (width, height): (u32, u32)) -> [usize; 2] {
         let width = f64::from(width.max(1));
         let height = f64::from(height.max(1));
         let (limit_width, limit_height) = if width < height {
@@ -798,8 +805,15 @@ pub(super) struct PreviewPlan {
     pub black_canvas: bool,
     pub overlays: Overlays,
     pub excluded_overlay: Option<u64>,
-    pub cursor: Option<super::cursor_effect::CursorTelemetry>,
-    pub cursor_effect: super::cursor_effect::CursorEffect,
+    pub cursor: Option<PreviewCursor>,
+    pub cursor_effect: CursorEffect,
+}
+
+pub(super) struct PreviewCursor {
+    pub telemetry: CursorTelemetry,
+    pub source_range: std::ops::Range<u64>,
+    pub viewport: CursorViewport,
+    pub zoom: CursorZoom,
 }
 
 fn preview_cache_key(plan: &PreviewPlan) -> Option<PreviewCacheKey> {
@@ -825,6 +839,7 @@ impl Preview {
         ctx: &egui::Context,
         plan: PreviewPlan,
         playing: bool,
+        zoom_spring: Option<ZoomSpring>,
     ) {
         self.stop_scrub_audio();
         self.stop();
@@ -912,6 +927,7 @@ impl Preview {
                 backdrop: plan.background,
                 cursor: plan.cursor,
                 cursor_effect: plan.cursor_effect,
+                zoom_spring: zoom_spring.unwrap_or_default(),
                 decoder: session.video.clone(),
                 frames,
                 errors: session.errors_tx.clone(),
@@ -1128,6 +1144,10 @@ impl Preview {
             .map(|epoch| Instant::now().saturating_duration_since(*epoch))
     }
 
+    pub(super) fn zoom_spring(&self) -> Option<ZoomSpring> {
+        self.session.as_ref()?.zoom_spring.clone()
+    }
+
     fn reap_video_workers(&mut self) {
         self.retired_video.retain(|worker| !worker.is_finished());
     }
@@ -1203,6 +1223,7 @@ mod preview_shutdown_tests {
                 let _ = output.send(VideoFrame {
                     time_us: 0,
                     pixels: Vec::new(),
+                    zoom_spring: None,
                 });
                 // Cleanup can still be running when a seek replaces the session.
                 thread::sleep(Duration::from_millis(20));
@@ -1256,6 +1277,7 @@ struct PreviewSession {
     first_frame_at: Option<Instant>,
     frames: Option<Receiver<VideoFrame>>,
     pending: Option<VideoFrame>,
+    zoom_spring: Option<ZoomSpring>,
     cache_key: Option<PreviewCacheKey>,
     errors_tx: mpsc::Sender<PreviewError>,
     errors: Receiver<PreviewError>,
@@ -1287,6 +1309,7 @@ impl PreviewSession {
             first_frame_at: (!has_video).then(Instant::now),
             frames: None,
             pending: None,
+            zoom_spring: None,
             cache_key: None,
             errors_tx,
             errors,
@@ -1321,6 +1344,9 @@ impl PreviewSession {
             }
             self.first_frame_at.get_or_insert_with(Instant::now);
             latest = Some(frame);
+        }
+        if let Some(frame) = &latest {
+            self.zoom_spring.clone_from(&frame.zoom_spring);
         }
         latest
     }
@@ -1401,6 +1427,7 @@ impl Decoder {
 struct VideoFrame {
     time_us: u64,
     pixels: Vec<u8>,
+    zoom_spring: Option<ZoomSpring>,
 }
 
 struct VideoDecode {
@@ -1419,8 +1446,9 @@ struct VideoDecode {
     fade_out_us: u64,
     overlays: Overlays,
     backdrop: super::background::BackgroundSettings,
-    cursor: Option<super::cursor_effect::CursorTelemetry>,
-    cursor_effect: super::cursor_effect::CursorEffect,
+    cursor: Option<PreviewCursor>,
+    cursor_effect: CursorEffect,
+    zoom_spring: ZoomSpring,
     decoder: Arc<Decoder>,
     frames: SyncSender<VideoFrame>,
     errors: mpsc::Sender<PreviewError>,
@@ -1570,6 +1598,7 @@ impl VideoDecode {
         self.decoder.decode(command, |stdout| {
             let mut reader = BufReader::new(stdout);
             let mut count = 0;
+            let mut zoom_spring = self.zoom_spring.clone();
             while !self.decoder.cancelled() {
                 let mut pixels = vec![0; width * height * 4];
                 match reader.read_exact(&mut pixels) {
@@ -1580,35 +1609,36 @@ impl VideoDecode {
                 let frame_time = self
                     .timeline_from
                     .saturating_add(count * USECS_PER_SEC / VIDEO_FPS);
-                let source_elapsed = frame_time
-                    .saturating_sub(self.timeline_from)
-                    .saturating_mul(u64::from(self.speed_milli.max(1)))
-                    .checked_div(1000)
-                    .unwrap_or(u64::MAX);
-                let cursor_time = if self.reverse {
-                    self.span.until_us.saturating_sub(1).saturating_sub(source_elapsed)
-                } else {
-                    self.span.from_us.saturating_add(source_elapsed)
-                };
-                if let Some(telemetry) = &self.cursor
-                    && let Some(sample) = telemetry.sample_at(cursor_time)
-                    && self.cursor_effect.contains(frame_time)
-                {
-                    render_cursor_overlay(
+                if let Some(cursor) = &self.cursor {
+                    let offset = frame_time.saturating_sub(self.timeline_start);
+                    let source_elapsed = offset
+                        .saturating_mul(u64::from(self.speed_milli.max(1))) / 1000;
+                    let source_time = if self.reverse {
+                        (cursor.source_range.end - 1)
+                            .saturating_sub(source_elapsed)
+                            .max(cursor.source_range.start)
+                    } else {
+                        cursor.source_range.start
+                            .saturating_add(source_elapsed)
+                            .min(cursor.source_range.end - 1)
+                    };
+                    let sample = cursor.telemetry.sample_at(source_time);
+                    let zoom = cursor.zoom.frame(offset, sample, cursor.viewport, &mut zoom_spring, playing);
+                    apply_cursor_effect(
                         &mut pixels,
                         width as u32,
                         height as u32,
-                        sample.x,
-                        sample.y,
-                        sample.pressed,
-                        self.cursor_effect.cursor_scale,
-                        self.cursor_effect.click_effect,
-                        telemetry.zoom_scale_at(cursor_time, self.cursor_effect.zoom_scale),
+                        sample,
+                        &self.cursor_effect,
+                        frame_time,
+                        zoom,
+                        cursor.viewport,
                     );
                 }
                 self.frames.send(VideoFrame {
                     time_us: count * USECS_PER_SEC / VIDEO_FPS,
                     pixels,
+                    zoom_spring: (playing && self.cursor.is_some()).then(|| zoom_spring.clone()),
                 })?;
                 count += 1;
                 self.ctx.request_repaint();
@@ -1618,28 +1648,102 @@ impl VideoDecode {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct CursorViewport {
+    origin: [f32; 2],
+    extent: [f32; 2],
+    surface: [u32; 2],
+}
+
+impl CursorViewport {
+    pub(super) fn map(self, point: [f32; 2]) -> [f32; 2] {
+        std::array::from_fn(|axis| self.origin[axis] + point[axis] * self.extent[axis])
+    }
+
+    pub(super) fn surface(self) -> [u32; 2] {
+        self.surface
+    }
+}
+
+pub(super) fn cursor_viewport(
+    size: (u32, u32),
+    composition: (u32, u32),
+    source: MediaInfo,
+    backdrop: &super::background::BackgroundSettings,
+) -> CursorViewport {
+    let (width, height) = size;
+    let (composition_width, composition_height) = composition;
+    let aspect = f64::from(source.width.max(1)) / f64::from(source.height.max(1))
+        * (f64::from(width) / f64::from(composition_width))
+        / (f64::from(height) / f64::from(composition_height));
+    let ((limit_width, limit_height), [side, top, bottom]) =
+        background::foreground_bounds(backdrop, size);
+    let round = |pixels: f64| {
+        if backdrop.enabled() {
+            (2.0 * (pixels / 2.0).round()).max(2.0)
+        } else {
+            pixels.round().max(1.0)
+        }
+    };
+    let fitted_width = round(f64::from(limit_width).min(f64::from(limit_height) * aspect)) as u32;
+    let fitted_height = round(f64::from(limit_height).min(f64::from(limit_width) / aspect)) as u32;
+    let left = (width.saturating_sub(fitted_width + side * 2)) / 2 + side;
+    let top = (height.saturating_sub(fitted_height + top + bottom)) / 2 + top;
+    CursorViewport {
+        origin: [left as f32 / width as f32, top as f32 / height as f32],
+        extent: [fitted_width as f32 / width as f32, fitted_height as f32 / height as f32],
+        surface: [width, height],
+    }
+}
+
+pub(super) fn apply_cursor_effect(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    mut sample: Option<CursorSample>,
+    effect: &CursorEffect,
+    timeline_time: u64,
+    zoom: Option<ZoomFrame>,
+    viewport: CursorViewport,
+) {
+    if !effect.contains(timeline_time) {
+        return;
+    }
+    if let Some(sample) = &mut sample {
+        [sample.x, sample.y] = viewport.map([sample.x, sample.y]);
+    }
+    if let Some(zoom) = zoom.filter(|zoom| zoom.scale > 1.0)
+        && zoom_rgba(pixels, width, height, zoom.center, zoom.scale)
+        && let Some(sample) = &mut sample
+    {
+        sample.x = (sample.x - zoom.center[0]) * zoom.scale + 0.5;
+        sample.y = (sample.y - zoom.center[1]) * zoom.scale + 0.5;
+    }
+    if let Some(sample) = sample
+        && (0.0..=1.0).contains(&sample.x)
+        && (0.0..=1.0).contains(&sample.y)
+    {
+        render_cursor_overlay(pixels, width, height, sample, effect);
+    }
+}
+
 fn render_cursor_overlay(
     pixels: &mut [u8],
     width: u32,
     height: u32,
-    x: f32,
-    y: f32,
-    pressed: bool,
-    scale: f32,
-    click_effect: super::cursor_effect::CursorClickEffect,
-    zoom_scale: f32,
+    sample: CursorSample,
+    effect: &CursorEffect,
 ) {
     if width == 0 || height == 0 {
         return;
     }
     let point = (
-        x.clamp(0.0, 1.0) * width as f32,
-        y.clamp(0.0, 1.0) * height as f32,
+        sample.x.clamp(0.0, 1.0) * width as f32,
+        sample.y.clamp(0.0, 1.0) * height as f32,
     );
-    if zoom_scale > 1.0 {
-        zoom_rgba_around_point(pixels, width, height, point, zoom_scale);
-    }
-    if pressed && click_effect != super::cursor_effect::CursorClickEffect::None {
+    let scale = effect.cursor_scale;
+    let click_effect = effect.click_effect;
+    if sample.pressed && click_effect != CursorClickEffect::None {
         let radius = 20.0 * scale;
         let min_x = (point.0 - radius - 3.0).max(0.0) as u32;
         let max_x = (point.0 + radius + 3.0).min(width as f32) as u32;
@@ -1650,15 +1754,19 @@ fn render_cursor_overlay(
                 let distance = ((px as f32 + 0.5 - point.0).powi(2)
                     + (py as f32 + 0.5 - point.1).powi(2))
                 .sqrt();
-                if click_effect == super::cursor_effect::CursorClickEffect::Ring
+                if click_effect == CursorClickEffect::Ring
                     && (distance - radius).abs() <= 2.5 * scale
-                    || click_effect == super::cursor_effect::CursorClickEffect::Dot
+                    || click_effect == CursorClickEffect::Dot
                         && distance <= 5.0 * scale
                 {
                     blend_rgba(pixels, width, height, px, py, [255, 150, 80, 255], 0.8);
                 }
             }
         }
+    }
+    if let Some(sprite) = effect.cursor_style.sprite() {
+        draw_cursor_sprite(pixels, width, height, point, 40.0 * scale, sprite);
+        return;
     }
     let size = 22.0 * scale;
     let points = [
@@ -1700,25 +1808,71 @@ fn render_cursor_overlay(
     }
 }
 
-fn zoom_rgba_around_point(
+fn draw_cursor_sprite(
     pixels: &mut [u8],
     width: u32,
     height: u32,
     point: (f32, f32),
-    scale: f32,
+    size: f32,
+    sprite: &CursorSprite,
 ) {
-    let original = pixels.to_vec();
-    for y in 0..height {
-        for x in 0..width {
-            let source_x = (point.0 + (x as f32 + 0.5 - point.0) / scale)
-                .clamp(0.0, width.saturating_sub(1) as f32) as u32;
-            let source_y = (point.1 + (y as f32 + 0.5 - point.1) / scale)
-                .clamp(0.0, height.saturating_sub(1) as f32) as u32;
-            let source = ((source_y * width + source_x) * 4) as usize;
-            let target = ((y * width + x) * 4) as usize;
-            pixels[target..target + 4].copy_from_slice(&original[source..source + 4]);
+    let origin_x = point.0 - sprite.hotspot[0] * size;
+    let origin_y = point.1 - sprite.hotspot[1] * size;
+    let left = origin_x.floor().max(0.0) as u32;
+    let top = origin_y.floor().max(0.0) as u32;
+    let right = (origin_x + size).ceil().min(width as f32).max(0.0) as u32;
+    let bottom = (origin_y + size).ceil().min(height as f32).max(0.0) as u32;
+    for y in top..bottom {
+        for x in left..right {
+            let source_x = (((x as f32 + 0.5 - origin_x) / size) * sprite.width as f32)
+                .floor()
+                .clamp(0.0, sprite.width.saturating_sub(1) as f32) as usize;
+            let source_y = (((y as f32 + 0.5 - origin_y) / size) * sprite.height as f32)
+                .floor()
+                .clamp(0.0, sprite.height.saturating_sub(1) as f32) as usize;
+            let source = (source_y * sprite.width as usize + source_x) * 4;
+            let color: [u8; 4] = sprite.rgba[source..source + 4].try_into().unwrap();
+            if color[3] != 0 {
+                blend_rgba(pixels, width, height, x, y, color, f32::from(color[3]) / 255.0);
+            }
         }
     }
+}
+
+fn zoom_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    center: [f32; 2],
+    scale: f32,
+) -> bool {
+    thread_local! {
+        static SCALER: RefCell<(Resizer, Vec<u8>)> = RefCell::default();
+    }
+    let crop_width = f64::from(width) / f64::from(scale);
+    let crop_height = f64::from(height) / f64::from(scale);
+    let left = (f64::from(center[0]) * f64::from(width) - crop_width * 0.5)
+        .clamp(0.0, f64::from(width) - crop_width);
+    let top = (f64::from(center[1]) * f64::from(height) - crop_height * 0.5)
+        .clamp(0.0, f64::from(height) - crop_height);
+    let options = ResizeOptions::new()
+        .resize_alg(ResizeAlg::Interpolation(FilterType::Bilinear))
+        .use_alpha(false)
+        .crop(left, top, crop_width, crop_height);
+    SCALER.with_borrow_mut(|(resizer, buffer)| {
+        let Ok(source) = ImageRef::new(width, height, pixels, PixelType::U8x4) else {
+            return false;
+        };
+        buffer.resize(pixels.len(), 0);
+        let Ok(mut output) = Image::from_slice_u8(width, height, buffer, PixelType::U8x4) else {
+            return false;
+        };
+        if resizer.resize(&source, &mut output, &options).is_err() {
+            return false;
+        }
+        pixels.copy_from_slice(output.buffer());
+        true
+    })
 }
 
 fn polygon_contains(point: (f32, f32), polygon: &[(f32, f32)]) -> bool {
@@ -1760,5 +1914,42 @@ fn blend_rgba(
             .round() as u8;
     }
     pixels[index + 3] = 0xff;
+}
+
+#[cfg(test)]
+mod cursor_style_render_tests {
+    use super::*;
+    use crate::editor::cursor_effect::CursorStyle;
+
+    fn rendered_cursor(style: CursorStyle) -> Vec<u8> {
+        let mut pixels = vec![255; 96 * 96 * 4];
+        let mut effect = CursorEffect::default_for(1);
+        effect.cursor_style = style;
+        render_cursor_overlay(
+            &mut pixels,
+            96,
+            96,
+            CursorSample {
+                at_us: 0,
+                x: 0.5,
+                y: 0.2,
+                pressed: false,
+            },
+            &effect,
+        );
+        pixels
+    }
+
+    #[test]
+    fn each_cursor_style_changes_the_rendered_pointer() {
+        let default = rendered_cursor(CursorStyle::Default);
+        for style in CursorStyle::ALL.into_iter().skip(1) {
+            assert_ne!(
+                rendered_cursor(style),
+                default,
+                "{style:?} should render differently"
+            );
+        }
+    }
 }
 

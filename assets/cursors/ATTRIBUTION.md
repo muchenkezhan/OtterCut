@@ -1,0 +1,3 @@
+The six PNGs are the arrow artwork from the OpenScreen cursor themes. They are distributed under the MIT license in [LICENSE-OpenScreen.txt](LICENSE-OpenScreen.txt). The original assets are named `arrow.png` in each theme directory. [OpenScreen cursor artwork at revision 2b65ea9](https://github.com/getopenscreen/openscreen/tree/2b65ea937184de88b6c2a0ccf6e54400c950b10e/public/cursors)
+
+OtterCut's click zoom also adapts OpenScreen's camera easing, transform, connected pans, and spring under the same MIT license. [OpenScreen playback code at revision ca8104c](https://github.com/siddharthvaddem/openscreen/tree/ca8104c279da0d4b4481ec992ff103949e22c772/src/components/video-editor/videoPlayback)

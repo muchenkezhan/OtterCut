@@ -26,6 +26,7 @@ pub(super) struct Library {
     directory: PathBuf,
     pub paths: Vec<PathBuf>,
     pub selected: Option<usize>,
+    preserve_empty_selection: bool,
     dismissed: HashSet<PathBuf>,
     info: HashMap<PathBuf, Result<MediaInfo, String>>,
     pending: HashSet<PathBuf>,
@@ -65,6 +66,7 @@ impl Library {
             directory,
             paths: Vec::new(),
             selected: None,
+            preserve_empty_selection: false,
             dismissed: HashSet::new(),
             info: HashMap::new(),
             pending: HashSet::new(),
@@ -84,6 +86,11 @@ impl Library {
             .map(PathBuf::as_path)
     }
 
+    pub(super) fn clear_selection(&mut self) {
+        self.selected = None;
+        self.preserve_empty_selection = true;
+    }
+
     pub(super) fn info(&self, path: &Path) -> Option<MediaInfo> {
         self.info
             .get(path)
@@ -100,6 +107,9 @@ impl Library {
 
     pub(super) fn insert(&mut self, path: PathBuf, select: bool) {
         self.dismissed.remove(&path);
+        if select {
+            self.preserve_empty_selection = false;
+        }
         let index = match self.paths.iter().position(|existing| *existing == path) {
             Some(index) => index,
             None => {
@@ -108,7 +118,7 @@ impl Library {
                 index
             }
         };
-        if select || self.selected.is_none() {
+        if select || (self.selected.is_none() && !self.preserve_empty_selection) {
             self.selected = Some(index);
         }
     }
@@ -130,6 +140,7 @@ impl Library {
     }
 
     pub(super) fn refresh_recordings(&mut self) {
+        let keep_unselected = self.selected.is_none() && self.preserve_empty_selection;
         let Ok(files) = fs::read_dir(&self.directory) else {
             return;
         };
@@ -157,6 +168,9 @@ impl Library {
             if !self.dismissed.contains(&path) {
                 self.insert(path, false);
             }
+        }
+        if keep_unselected {
+            self.selected = None;
         }
     }
 
@@ -237,6 +251,39 @@ mod tests {
         library.refresh_recordings();
         assert_eq!(library.paths.as_slice(), std::slice::from_ref(&recorded));
         assert_eq!(library.selected_path(), Some(recorded.as_path()));
+    }
+
+    #[test]
+    fn refresh_keeps_an_explicitly_empty_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join(format!("{PRODUCT_NAME}-001.mp4"));
+        let second = directory.path().join(format!("{PRODUCT_NAME}-002.mp4"));
+        fs::write(&first, b"first").unwrap();
+        let ctx = egui::Context::default();
+        let mut library = Library::new(directory.path().to_owned(), None, &ctx);
+
+        assert_eq!(library.selected_path(), Some(first.as_path()));
+        library.clear_selection();
+        fs::write(&second, b"second").unwrap();
+        library.refresh_recordings();
+
+        assert_eq!(library.paths.len(), 2);
+        assert_eq!(library.selected_path(), None);
+    }
+
+    #[test]
+    fn refresh_does_not_select_new_recordings_after_a_blank_project_starts_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut library = Library::new(directory.path().to_owned(), None, &ctx);
+        library.clear_selection();
+        let recorded = directory.path().join(format!("{PRODUCT_NAME}-new.mp4"));
+        fs::write(&recorded, b"recording").unwrap();
+
+        library.refresh_recordings();
+
+        assert_eq!(library.paths.as_slice(), std::slice::from_ref(&recorded));
+        assert_eq!(library.selected_path(), None);
     }
 
     #[test]

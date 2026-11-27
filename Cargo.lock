@@ -3201,6 +3201,7 @@ dependencies = [
  "eframe",
  "fast_image_resize",
  "futures-lite",
+ "image",
  "libc",
  "raw-window-handle",
  "rfd",

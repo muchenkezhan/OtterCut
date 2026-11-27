@@ -316,20 +316,46 @@ fn rounded_layer(foreground: &str, radius: f64) -> String {
     )
 }
 
-fn frame_trim(style: BackgroundFrame, scale: f64, bounds: (u32, u32)) -> ((u32, u32), String) {
+fn frame_edges(style: BackgroundFrame, scale: f64, (width, height): (u32, u32)) -> ([u32; 3], &'static str) {
     let (side, top, bottom, finish) = match style {
-        BackgroundFrame::None => return (bounds, String::new()),
+        BackgroundFrame::None => return ([0; 3], ""),
         BackgroundFrame::Window => (3.0, 34.0, 3.0, "0x343946"),
         BackgroundFrame::Laptop => (14.0, 20.0, 43.0, "0x373B45"),
         BackgroundFrame::Phone => (18.0, 33.0, 26.0, "0x242936"),
         BackgroundFrame::Monitor => (11.0, 11.0, 25.0, "0x292E38"),
     };
     let pixels = |native: f64| (native * scale).round().max(1.0) as u32;
-    let (width, height) = bounds;
     let side = pixels(side).min(width.saturating_sub(2) / 2);
     let top = pixels(top).min(height.saturating_sub(2) / 2);
     let bottom = pixels(bottom).min(height.saturating_sub(top + 2));
-    let body = (width - side * 2, height - top - bottom);
+    ([side, top, bottom], finish)
+}
+
+pub(super) fn foreground_bounds(
+    settings: &BackgroundSettings,
+    size: (u32, u32),
+) -> ((u32, u32), [u32; 3]) {
+    if !settings.enabled() {
+        return (size, [0; 3]);
+    }
+    let (width, height) = size;
+    let short = width.min(height);
+    let inset = (u64::from(short) * u64::from(settings.inset) / 100) as u32;
+    let limit = |side: u32| side.saturating_sub(inset * 2).max(2) & !1;
+    let bounds = (limit(width), limit(height));
+    let (edges, _) = frame_edges(settings.frame, f64::from(short) / 1080.0, bounds);
+    let [side, top, bottom] = edges;
+    ((bounds.0 - 2 * side, (bounds.1 - top - bottom) & !1), edges)
+}
+
+fn frame_trim(style: BackgroundFrame, [side, top, bottom]: [u32; 3]) -> String {
+    let finish = match style {
+        BackgroundFrame::None => return String::new(),
+        BackgroundFrame::Window => "0x343946",
+        BackgroundFrame::Laptop => "0x373B45",
+        BackgroundFrame::Phone => "0x242936",
+        BackgroundFrame::Monitor => "0x292E38",
+    };
     let mut trim = format!(
         ",pad=iw+{}:ih+{}:{side}:{top}:color={finish}",
         side * 2,
@@ -358,7 +384,7 @@ fn frame_trim(style: BackgroundFrame, scale: f64, bounds: (u32, u32)) -> ((u32, 
             ",drawbox=x=iw*0.43:y=ih-{y}:w=iw*0.14:h=1:color=white@0.21:t=fill"
         );
     }
-    (body, trim)
+    trim
 }
 
 fn shadow_filter(shadow: BackgroundShadow, scale: f64) -> Option<String> {
@@ -451,13 +477,9 @@ pub(in crate::editor) fn filter(
         return Ok(format!("[in]nullsink;{background},{output}[out]"));
     }
 
-    let inset = (u64::from(short) * u64::from(settings.inset) / 100) as u32;
-    let limit = |side: u32| side.saturating_sub(inset.saturating_mul(2)).max(2) & !1;
-    let ((inner_width, inner_height), trim) =
-        frame_trim(settings.frame, scale, (limit(width), limit(height)));
+    let ((inner_width, inner_height), edges) = foreground_bounds(settings, size);
+    let trim = frame_trim(settings.frame, edges);
     let dar = format!("(dar*{width}*{composition_height}/({height}*{composition_width}))");
-    let inner_width = inner_width & !1;
-    let inner_height = inner_height & !1;
     let fit = format!(
         "scale=w='max(2,2*round(min({inner_width},{inner_height}*{dar})/2))':h='max(2,2*round(min({inner_height},{inner_width}/{dar})/2))':flags=bilinear,setsar=1,format=yuv444p{trim}"
     );

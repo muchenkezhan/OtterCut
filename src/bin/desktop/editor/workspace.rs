@@ -4,6 +4,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use eframe::egui::{self, Align, Layout, RichText, vec2};
 use takeseam::PRODUCT_NAME;
 use takeseam::editor_timeline::{
@@ -17,7 +18,8 @@ use super::background::{BackgroundSettings, BackgroundSource};
 use super::background_panel;
 use super::canvas_format::CanvasFormat;
 use super::cursor_effect::{
-    CursorClickEffect, CursorEffect, CursorTelemetry, timeline_time_for_sample,
+    CursorClickEffect, CursorEffect, CursorStyle, CursorTelemetry, ZOOM_HOLD_RANGE, ZOOM_PAN_RANGE,
+    ZOOM_SCALE_RANGE, ZOOM_TRANSITION_RANGE, timeline_time_for_sample,
 };
 use super::dock_model::{DockState, Pane};
 use super::export::{ExportJob, ExportQuality, ExportResolution, ExportSettings};
@@ -35,7 +37,7 @@ use super::speech::{SpeechCue, SpeechJob};
 use super::subtitle_canvas::SubtitleCanvas;
 use super::text_panel::TextInspector;
 use super::thumbnails::Thumbnails;
-use super::timeline_view::{TimelineView, TrackDestination};
+use super::timeline_view::{CursorTrackData, TimelineView, TrackDestination};
 use super::transition_panel;
 #[cfg(windows)]
 use super::window_frame;
@@ -50,10 +52,16 @@ const PREVIEW_SCRUB_STEP_US: u64 = 100_000;
 #[cfg(test)]
 #[path = "workspace/drag_drop_tests.rs"]
 mod drag_drop_tests;
+#[cfg(test)]
+#[path = "workspace/cursor_tracks_tests.rs"]
+mod cursor_tracks_tests;
 #[path = "workspace/narration.rs"]
 mod narration;
 #[path = "workspace/overlays.rs"]
 mod overlays;
+#[cfg(test)]
+#[path = "workspace/project_lifecycle_tests.rs"]
+mod project_lifecycle_tests;
 
 pub(super) struct Workspace {
     logo: egui::TextureHandle,
@@ -115,8 +123,7 @@ struct MaterialAddition {
 #[derive(Default)]
 struct CursorMarkerCache {
     key: Option<u64>,
-    markers: Vec<u64>,
-    available: bool,
+    markers: Vec<CursorTrackData>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -571,6 +578,7 @@ impl Workspace {
             settings,
             self.canvas_format,
             self.background.clone(),
+            self.cursor_effect.clone(),
         ) {
             self.show_notice(format!("{error:#}"), true);
         } else {
@@ -1245,10 +1253,8 @@ impl Workspace {
         } else {
             self.position
         };
-        let (cursor_markers, cursor_available) =
-            cursor_markers(&self.timeline, &mut self.cursor_marker_cache);
-        self.timeline_view
-            .set_cursor_markers(cursor_markers, cursor_available);
+        let cursor_tracks = cursor_tracks(&self.timeline, &mut self.cursor_marker_cache);
+        self.timeline_view.set_cursor_tracks(cursor_tracks);
         self.timeline_view.set_user_markers(self.markers.clone());
         let input = self.timeline_view.draw_with_cursor_effect(
             ui,
@@ -1427,7 +1433,11 @@ impl Workspace {
         layout_changed |= dock_view::show(ui, &mut docking, &caption, |pane, ui| match pane {
             Pane::Materials => self.feature_panel(ui),
             Pane::Preview => self.preview(ui),
-            Pane::Inspector => self.inspector(ui),
+            Pane::Inspector => {
+                egui::ScrollArea::vertical()
+                    .id_salt("inspector-scroll")
+                    .show(ui, |ui| self.inspector(ui));
+            }
             Pane::Timeline => self.timeline(ui),
         });
         if layout_changed
@@ -1919,17 +1929,107 @@ impl Workspace {
                     .text("结束"),
                 );
                 ui.checkbox(&mut self.cursor_effect.enabled, "显示鼠标");
+                self.cursor_zoom_inspector(ui);
+                ui.label("光标样式");
+                let palette = ui_theme::palette(ui.ctx());
+                let preview_key = egui::Id::new("cursor-style-theme-previews");
+                let preview_textures = ui
+                    .data(|data| data.get_temp::<Vec<(CursorStyle, egui::TextureHandle)>>(preview_key))
+                    .unwrap_or_else(|| {
+                        let textures = CursorStyle::ALL
+                            .into_iter()
+                            .filter_map(|style| {
+                                let sprite = style.sprite()?;
+                                let image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [sprite.width as usize, sprite.height as usize],
+                                    &sprite.rgba,
+                                );
+                                let filter = if style == CursorStyle::Pixel {
+                                    egui::TextureOptions::NEAREST
+                                } else {
+                                    egui::TextureOptions::LINEAR
+                                };
+                                Some((
+                                    style,
+                                    ui.ctx().load_texture(
+                                        format!("cursor-style-{}", style.label()),
+                                        image,
+                                        filter,
+                                    ),
+                                ))
+                            })
+                            .collect::<Vec<_>>();
+                        ui.data_mut(|data| data.insert_temp(preview_key, textures.clone()));
+                        textures
+                    });
+                ui.horizontal_wrapped(|ui| {
+                    for style in CursorStyle::ALL {
+                        let selected = self.cursor_effect.cursor_style == style;
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(62.0, 48.0), egui::Sense::click());
+                        let tile_fill = if selected {
+                            palette.control.gamma_multiply(0.9)
+                        } else if response.hovered() || response.has_focus() {
+                            palette.hover
+                        } else {
+                            palette.surface
+                        };
+                        ui.painter().rect_filled(rect, 5.0, tile_fill);
+                        ui.painter().rect_stroke(
+                            rect,
+                            5.0,
+                            egui::Stroke::new(
+                                if selected { 1.5_f32 } else { 1.0_f32 },
+                                if selected { palette.accent } else { palette.border },
+                            ),
+                            egui::StrokeKind::Inside,
+                        );
+
+                        let preview_rect = egui::Rect::from_center_size(
+                            rect.center_top() + vec2(0.0, 20.0),
+                            vec2(34.0, 34.0),
+                        );
+                        if let Some((_, texture)) = preview_textures
+                            .iter()
+                            .find(|(candidate, _)| *candidate == style)
+                        {
+                            ui.painter().image(
+                                texture.id(),
+                                preview_rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        } else {
+                            Icon::Cursor.paint_scaled(
+                                ui.painter(),
+                                preview_rect.center(),
+                                palette.text,
+                                1.2,
+                            );
+                        }
+                        ui.painter().text(
+                            rect.center_bottom() - vec2(0.0, 6.0),
+                            egui::Align2::CENTER_CENTER,
+                            style.label(),
+                            egui::FontId::proportional(9.5),
+                            if selected { palette.accent } else { palette.text },
+                        );
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::Button,
+                                response.enabled(),
+                                selected,
+                                style.label(),
+                            )
+                        });
+                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            self.cursor_effect.cursor_style = style;
+                        }
+                    }
+                });
                 ui.add(
                     egui::Slider::new(&mut self.cursor_effect.cursor_scale, 0.5..=4.0)
                         .text("鼠标大小"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.cursor_effect.zoom_scale, 1.0..=3.0)
-                        .text("点击放大"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.cursor_effect.smoothing, 0.0..=1.0)
-                        .text("跟随平滑"),
                 );
                 ui.horizontal(|ui| {
                     ui.label("点击反馈");
@@ -1947,6 +2047,105 @@ impl Workspace {
                     }
                 });
             });
+    }
+
+    fn cursor_zoom_inspector(&mut self, ui: &mut egui::Ui) {
+        let effect = &mut self.cursor_effect;
+        let reset_transition = ui
+            .horizontal_wrapped(|ui| {
+                ui.strong("点击放大");
+                ui.selectable_label(effect.zoom_transition_us.is_none(), "自动过渡")
+                    .on_hover_text("OpenScreen 的默认过渡，放大 1.52 秒，回退 1.02 秒")
+                    .clicked()
+            })
+            .inner;
+        let mut transition_us = effect.zoom_transition_us();
+        let original_transition_us = transition_us;
+        ui.checkbox(&mut effect.zoom_follow_cursor, "镜头跟随鼠标")
+            .on_hover_text("放大时随录制的鼠标移动。关闭后按点击位置平移");
+
+        egui::Grid::new("cursor-zoom-settings")
+            .num_columns(2)
+            .min_col_width(0.0)
+            .min_row_height(20.0)
+            .spacing(vec2(6.0, 3.0))
+            .show(ui, |ui| {
+                ui.spacing_mut().interact_size.y = 20.0;
+                let label = ui.label("倍率");
+                ui.add(
+                    egui::DragValue::new(&mut effect.zoom_scale)
+                        .range(ZOOM_SCALE_RANGE)
+                        .speed(0.01)
+                        .fixed_decimals(2)
+                        .suffix("×"),
+                )
+                .labelled_by(label.id)
+                .on_hover_text("设为 1 倍可关闭点击放大");
+                ui.end_row();
+
+                for (label, help, duration_us, range_us, enabled) in [
+                    (
+                        "过渡",
+                        "自动时显示回退时长。手动修改后，放大和回退共用这个时长",
+                        &mut transition_us,
+                        ZOOM_TRANSITION_RANGE,
+                        true,
+                    ),
+                    (
+                        "停留",
+                        "放大后保持的时长",
+                        &mut effect.zoom_hold_us,
+                        ZOOM_HOLD_RANGE,
+                        true,
+                    ),
+                    (
+                        "平移",
+                        "关闭镜头跟随时，在连续点击位置之间平移的时长",
+                        &mut effect.zoom_pan_us,
+                        ZOOM_PAN_RANGE,
+                        !effect.zoom_follow_cursor,
+                    ),
+                ] {
+                    let label = ui.label(label).on_hover_text(help);
+                    const US_PER_SECOND: f64 = 1_000_000.0;
+                    let mut seconds = *duration_us as f64 / US_PER_SECOND;
+                    let range_seconds = (*range_us.start() as f64 / US_PER_SECOND)
+                        ..=(*range_us.end() as f64 / US_PER_SECOND);
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::DragValue::new(&mut seconds)
+                                .range(range_seconds)
+                                .speed(0.01)
+                                .fixed_decimals(2)
+                                .suffix(" 秒"),
+                        )
+                        .labelled_by(label.id)
+                        .on_hover_text(help)
+                        .changed()
+                    {
+                        *duration_us = (seconds * US_PER_SECOND).round() as u64;
+                    }
+                    ui.end_row();
+                }
+                let label = ui.label("跟随平滑");
+                ui.add_enabled(
+                    effect.zoom_follow_cursor,
+                    egui::DragValue::new(&mut effect.smoothing)
+                        .range(0.0..=1.0)
+                        .speed(0.01)
+                        .fixed_decimals(2),
+                )
+                .labelled_by(label.id)
+                .on_hover_text("调低时镜头更快追上鼠标，调高时镜头移动更平缓");
+                ui.end_row();
+            });
+
+        if reset_transition {
+            effect.zoom_transition_us = None;
+        } else if transition_us != original_transition_us {
+            effect.zoom_transition_us = Some(transition_us);
+        }
     }
 
     fn home_screen(&mut self, ui: &mut egui::Ui) {
@@ -2406,20 +2605,70 @@ impl Workspace {
         self.timeline = Timeline::from_tracks(Vec::new()).expect("empty timeline is valid");
         self.timeline_view = TimelineView::with_media(self.tools.clone(), ctx);
         self.cursor_marker_cache = CursorMarkerCache::default();
-        self.project = None;
-        self.proxy_cache.set_project(None);
+        self.library.clear_selection();
         self.selected_clip = None;
         self.position = 0;
-        self.saved_revision = self.timeline.revision();
         self.cursor_effect = CursorEffect::default_for(1);
+        self.saved_revision = self.timeline.revision();
         self.saved_cursor_effect = self.cursor_effect.clone();
         self.background = BackgroundSettings::default();
         self.saved_background = self.background.clone();
         self.canvas_format = CanvasFormat::Original;
         self.saved_canvas_format = CanvasFormat::Original;
+        self.markers.clear();
+        self.saved_markers.clear();
+        self.pending_additions.clear();
+        self.volume_preview = None;
+        self.material_info = None;
+        self.text_inspector = TextInspector::default();
+        self.subtitle_canvas.cancel();
+        self.preview_viewport.reset();
+        self.export_settings = None;
+        self.media_error = None;
+        self.player.playing = false;
         self.player.reset();
+        match new_project_path(self.library.directory()).and_then(|path| {
+            project::save_with_cursor(
+                &path,
+                &self.timeline,
+                self.position,
+                self.canvas_format,
+                &self.background,
+                &self.cursor_effect,
+                &self.markers,
+            )?;
+            Ok(path)
+        }) {
+            Ok(path) => {
+                self.project = Some(path);
+                self.proxy_cache.set_project(self.project.as_deref());
+                self.saved_revision = self.timeline.revision();
+                self.show_notice("新工程已创建并保存在本地", false);
+            }
+            Err(error) => {
+                self.project = None;
+                self.proxy_cache.set_project(None);
+                self.show_notice(format!("新工程已创建，但无法保存到本地（{error:#}）"), true);
+            }
+        }
         self.home = false;
     }
+}
+
+fn new_project_path(directory: &Path) -> anyhow::Result<PathBuf> {
+    fs::create_dir_all(directory).context("无法创建本地工程目录")?;
+    for suffix in 1_u32.. {
+        let name = if suffix == 1 {
+            String::from("未命名工程.takeproj")
+        } else {
+            format!("未命名工程 ({suffix}).takeproj")
+        };
+        let path = directory.join(name);
+        if !path.try_exists()? {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!("无法生成新的工程文件名")
 }
 
 fn format_modified(modified: SystemTime) -> String {
@@ -2438,14 +2687,10 @@ fn format_modified(modified: SystemTime) -> String {
     label
 }
 
-fn cursor_markers<'a>(
-    timeline: &Timeline,
-    cache: &'a mut CursorMarkerCache,
-) -> (&'a [u64], bool) {
+fn cursor_tracks<'a>(timeline: &Timeline, cache: &'a mut CursorMarkerCache) -> &'a [CursorTrackData] {
     let key = cursor_marker_cache_key(timeline);
     if cache.key != Some(key) {
-        let mut markers = Vec::new();
-        let mut available = false;
+        let mut cursor_tracks = Vec::new();
         for clip in timeline
             .tracks()
             .iter()
@@ -2459,24 +2704,25 @@ fn cursor_markers<'a>(
             let Ok(telemetry) = CursorTelemetry::load(&path) else {
                 continue;
             };
-            available = true;
-            markers.extend(
-                telemetry
-                    .samples
-                    .iter()
-                    .filter(|sample| sample.pressed)
-                    .filter_map(|sample| timeline_time_for_sample(clip, sample.at_us)),
-            );
+            let mut markers = telemetry
+                .samples
+                .iter()
+                .filter(|sample| sample.pressed)
+                .filter_map(|sample| timeline_time_for_sample(clip, sample.at_us))
+                .collect::<Vec<_>>();
+            markers.sort_unstable();
+            markers.dedup();
+            cursor_tracks.push(CursorTrackData {
+                clip_id: clip.id,
+                markers,
+            });
         }
-        markers.sort_unstable();
-        markers.dedup();
         *cache = CursorMarkerCache {
             key: Some(key),
-            markers,
-            available,
+            markers: cursor_tracks,
         };
     }
-    (&cache.markers, cache.available)
+    &cache.markers
 }
 
 fn cursor_marker_cache_key(timeline: &Timeline) -> u64 {

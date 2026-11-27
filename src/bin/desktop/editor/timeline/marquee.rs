@@ -79,7 +79,7 @@ impl MarqueeSelection {
         view: Viewport,
         rows: Rows,
         primary: &mut Option<u64>,
-        ignored: Option<Rect>,
+        ignored: &[Rect],
         enabled: bool,
     ) -> bool {
         self.preview = None;
@@ -108,7 +108,7 @@ impl MarqueeSelection {
                 } => {
                     self.press = None;
                     if area.contains(pos)
-                        && !ignored.is_some_and(|rect| rect.contains(pos))
+                        && !ignored.iter().any(|rect| rect.contains(pos))
                         && ui
                             .ctx()
                             .layer_id_at(pos)
