@@ -280,6 +280,10 @@ impl TimelineView {
         let colors = ui_theme::palette(ui.ctx());
         let all = painter.with_clip_rect(rows.area);
         let media = all.with_clip_rect(view.rect);
+        let cursor_view = Viewport {
+            rect: view.rect.intersect(rows.area),
+            ..view
+        };
         let mut video_number = timeline
             .tracks()
             .iter()
@@ -349,12 +353,12 @@ impl TimelineView {
             for clip in &track.clips {
                 let mut clip_rect = rect;
                 if track.kind == TrackKind::Video
-                    && let Some(markers) = self.cursor_track_for(clip.id).map(<[u64]>::to_vec)
+                    && let Some(markers) = self.cursor_track_for(clip.id).map(<[_]>::to_vec)
                 {
                     self.draw_cursor_track_for_clip(
                         ui,
                         &media,
-                        view,
+                        cursor_view,
                         rect,
                         clip,
                         &markers,

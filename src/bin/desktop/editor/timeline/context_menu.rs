@@ -1,8 +1,9 @@
 use eframe::egui::{self, Event, PointerButton, Pos2, Response, Ui};
 use takeseam::editor_timeline::{Timeline, TimelineError, TrackId, TrackKind};
+use takeseam::i18n::{Locale, key};
 
 use super::super::layout;
-use super::TimelineView;
+use super::{CursorClick, TimelineView};
 use super::canvas::Viewport;
 use super::commands::{ClipboardClip, Edge, copy_clip, cut_clip, paste_clip, trim};
 use super::edge_drop::TrackGap;
@@ -17,6 +18,7 @@ pub(super) struct ContextMenu {
 #[derive(Clone, Copy)]
 enum Target {
     Clip(u64, u64),
+    CursorClick(CursorClick),
     Header(TrackId),
     Lane(TrackId, u64),
     Ruler(u64),
@@ -30,6 +32,7 @@ pub(super) enum Action {
     Cut(u64),
     Copy(u64),
     Delete(u64, bool),
+    DeleteCursorClick(CursorClick),
     ResetVolume(u64),
     LinkSelection,
     UnlinkSelection,
@@ -64,6 +67,13 @@ pub(super) fn close(ui: &Ui) {
 }
 
 impl ContextMenu {
+    pub(super) fn for_cursor_click(position: Pos2, click: CursorClick) -> Self {
+        Self {
+            position,
+            target: Target::CursorClick(click),
+        }
+    }
+
     pub(super) fn at_release(
         ui: &Ui,
         view: Viewport,
@@ -165,6 +175,7 @@ impl Target {
         markers: &[u64],
     ) -> Option<Action> {
         layout::compact_menu(ui);
+        let locale = Locale::from_context(ui.ctx());
         let mut chosen = None;
         let can_paste = clipboard.is_some();
         let mut item = |label, enabled, action| {
@@ -175,6 +186,9 @@ impl Target {
         };
 
         match self {
+            Self::CursorClick(click) => {
+                item(locale.text(key::CURSOR_CLICK_DELETE), true, Action::DeleteCursorClick(click));
+            }
             Self::Clip(id, at) => {
                 let track = timeline.track_for_clip(id)?;
                 let clip = track.clips.iter().find(|clip| clip.id == id)?;
@@ -341,6 +355,10 @@ impl TimelineView {
                 *selected = None;
             }
             Action::Delete(id, ripple) => timeline.remove(id, ripple)?,
+            Action::DeleteCursorClick(click) => {
+                timeline.delete_cursor_click(click.clip_id, click.source_us)?;
+                self.cursor_click = None;
+            }
             Action::ResetVolume(id) => timeline.set_clip_volume(id, 0)?,
             Action::LinkSelection => timeline.link_clips(self.marquee.ids())?,
             Action::UnlinkSelection => timeline.unlink_clips(self.marquee.ids())?,

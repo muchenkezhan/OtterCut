@@ -8,6 +8,127 @@ use super::edge_drop::{BAND_HEIGHT, TrackGap};
 use super::track_rows::Rows;
 use super::{Mode, TRACK_HEADER, TimelineInput, TimelineView};
 
+#[test]
+fn cursor_points_can_be_selected_and_deleted_using_the_keyboard_or_menu() {
+    use super::{CursorClickMarker, CursorTrackData};
+    use takeseam::i18n::{Language, Locale, key};
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    Locale::set_context(&ctx, Language::ZhCn);
+    let mut timeline = Timeline::default();
+    let clip_id = timeline.append("screen.mp4".into(), 8_000_000).unwrap();
+    let mut view = TimelineView::default();
+    let markers = [0, 3_000_000].map(|at| CursorClickMarker {
+        timeline_us: at,
+        source_us: at,
+    });
+    let mut selected = Some(clip_id);
+    let mut playhead = 500_000;
+    let mut frame = |events| {
+        let clip = timeline.clip(clip_id).unwrap();
+        view.set_cursor_tracks(&[CursorTrackData {
+            clip_id,
+            markers: markers
+                .iter()
+                .copied()
+                .filter(|marker| !clip.deleted_cursor_clicks_us.contains(&marker.source_us))
+                .collect(),
+        }]);
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 470.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let input = view.draw(ui, &mut timeline, &mut playhead, &mut selected, true);
+                assert!(input.error.is_none(), "{:?}", input.error);
+            },
+        );
+        (
+            output,
+            view.cursor_click,
+            playhead,
+            timeline
+                .clip(clip_id)
+                .unwrap()
+                .deleted_cursor_clicks_us
+                .clone(),
+        )
+    };
+    let centers = |output: egui::FullOutput, key| {
+        let label = Locale::new(Language::ZhCn).text(key);
+        let mut centers = output
+            .platform_output
+            .accesskit_update
+            .unwrap()
+            .nodes
+            .into_iter()
+            .filter(|(_, node)| node.label() == Some(label))
+            .filter_map(|(_, node)| node.bounds())
+            .map(|bounds| {
+                pos2(
+                    ((bounds.x0 + bounds.x1) * 0.5) as f32,
+                    ((bounds.y0 + bounds.y1) * 0.5) as f32,
+                )
+            })
+            .collect::<Vec<_>>();
+        centers.sort_unstable_by(|a, b| a.x.total_cmp(&b.x));
+        centers
+    };
+    let pointer = |pos, button, pressed| Event::PointerButton {
+        pos,
+        button,
+        pressed,
+        modifiers: Modifiers::NONE,
+    };
+    let press = |key, modifiers| Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    };
+
+    let points = centers(frame(vec![]).0, key::CURSOR_CLICK_POINT);
+    assert_eq!(points.len(), 2);
+    let first = points[0];
+    frame(vec![
+        Event::PointerMoved(first),
+        pointer(first, PointerButton::Primary, true),
+    ]);
+    let (_, click, time, deleted) = frame(vec![pointer(first, PointerButton::Primary, false)]);
+    assert_eq!(click.unwrap().source_us, markers[0].source_us);
+    assert_eq!(time, markers[0].timeline_us);
+    assert!(deleted.is_empty());
+    let (_, click, _, deleted) = frame(vec![press(egui::Key::Backspace, Modifiers::NONE)]);
+    assert!(click.is_none());
+    assert_eq!(deleted, [markers[0].source_us]);
+
+    let second = points[1];
+    frame(vec![
+        Event::PointerMoved(second),
+        pointer(second, PointerButton::Secondary, true),
+    ]);
+    let (_, click, _, deleted) = frame(vec![pointer(second, PointerButton::Secondary, false)]);
+    assert_eq!(click.unwrap().source_us, markers[1].source_us);
+    assert_eq!(deleted, [markers[0].source_us]);
+    let items = centers(frame(vec![]).0, key::CURSOR_CLICK_DELETE);
+    assert_eq!(items.len(), 1);
+    let delete = items[0];
+    frame(vec![
+        Event::PointerMoved(delete),
+        pointer(delete, PointerButton::Primary, true),
+    ]);
+    let (_, click, _, deleted) = frame(vec![pointer(delete, PointerButton::Primary, false)]);
+    assert!(click.is_none());
+    assert_eq!(deleted, [markers[0].source_us, markers[1].source_us]);
+
+    let (_, _, _, deleted) = frame(vec![press(egui::Key::Z, Modifiers::COMMAND)]);
+    assert_eq!(deleted, [markers[0].source_us]);
+}
+
 fn clipboard_frame(
     ctx: &egui::Context,
     view: &mut TimelineView,

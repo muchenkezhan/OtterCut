@@ -37,6 +37,8 @@ mod background_panel;
 mod canvas_format;
 #[path = "editor/cursor_effect.rs"]
 mod cursor_effect;
+#[path = "editor/cursor_inspector.rs"]
+mod cursor_inspector;
 #[path = "editor/dock_model.rs"]
 mod dock_model;
 #[path = "editor/dock_presets.rs"]

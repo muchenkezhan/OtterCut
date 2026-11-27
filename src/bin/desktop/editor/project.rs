@@ -306,6 +306,7 @@ mod tests {
         let id = timeline.append(source, 5_000_000).unwrap();
         let right = timeline.split(id, 1_000_000).unwrap();
         timeline.trim_end(right, 3_500_000, false).unwrap();
+        timeline.delete_cursor_click(right, 2_000_001).unwrap();
         let audio = timeline
             .insert_media_on_track(
                 PRIMARY_AUDIO,
@@ -374,6 +375,13 @@ mod tests {
         assert_eq!(position, 20);
         assert_eq!(canvas, CanvasFormat::Original);
         assert_eq!(timeline.track_for_clip(5).unwrap().id, PRIMARY_VIDEO);
+        assert!(
+            timeline
+                .clip(5)
+                .unwrap()
+                .deleted_cursor_clicks_us
+                .is_empty()
+        );
         assert_eq!(
             timeline.clip(5).unwrap().path,
             directory.path().join("legacy.mp4")

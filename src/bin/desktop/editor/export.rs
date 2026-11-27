@@ -384,6 +384,7 @@ fn export_with_settings(
                         ..cursor_effect.end_us.saturating_sub(clip.start).min(clip.duration());
                     CursorZoom::new(
                         telemetry,
+                        &clip.deleted_cursor_clicks_us,
                         clip.source_start..clip.source_end,
                         clip.speed_milli,
                         clip.reverse,
@@ -804,7 +805,9 @@ fn compose_cursor_frames(
             cursor.clip.source_start + source_elapsed
         }
         .clamp(cursor.clip.source_start, cursor.clip.source_end - 1);
-        let sample = cursor.telemetry.sample_at(source_time);
+        let sample = cursor
+            .telemetry
+            .sample_at(source_time, &cursor.clip.deleted_cursor_clicks_us);
         let zoom = cursor.zoom.frame(
             time - cursor.clip.start,
             sample,
@@ -1053,7 +1056,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires local FFmpeg and FFprobe"]
-    fn export_ramps_into_click_zoom_and_returns_to_normal_with_audio() {
+    fn export_uses_each_clips_clicks_to_render_zoom_with_audio() {
         use crate::editor::cursor_effect::{CursorClickEffect, CursorSample, CursorStyle};
 
         let tools = MediaTools::discover().unwrap();
@@ -1082,11 +1085,13 @@ mod tests {
         )
         .unwrap();
         let mut timeline = Timeline::default();
-        timeline.insert_media(source, duration, 0).unwrap();
+        let edited_clip = timeline.insert_media(source.clone(), duration, 0).unwrap();
+        timeline.delete_cursor_click(edited_clip, 1_200_000).unwrap();
+        timeline.insert_media(source, duration, duration).unwrap();
         let mut settings = ExportSettings::new(temporary.path());
         settings.output = temporary.path().join("zoom.mp4");
         settings.fps = 60;
-        let mut effect = CursorEffect::default_for(duration);
+        let mut effect = CursorEffect::default_for(timeline.duration());
         effect.zoom_scale = 2.0;
         effect.click_effect = CursorClickEffect::None;
         effect.cursor_style = CursorStyle::Coral;
@@ -1104,10 +1109,16 @@ mod tests {
         let output = &settings.output;
         let info = tools.probe(output).unwrap();
         assert!(info.has_video && info.has_audio);
-        assert!(info.duration_us.abs_diff(duration) <= 40_000);
+        assert!(info.duration_us.abs_diff(timeline.duration()) <= 40_000);
         let samples = audio_samples(&tools, output, "1.40");
         assert!(tone(&samples, 440.0) > 0.015);
-        for (position, zoomed) in [("0.10", false), ("0.80", true), ("1.40", true), ("3.80", false)] {
+        for (position, zoomed) in [
+            ("1.40", false),
+            ("4.10", false),
+            ("4.80", true),
+            ("5.40", true),
+            ("7.80", false),
+        ] {
             let frame = hidden_command(&tools.ffmpeg)
                 .args(["-hide_banner", "-loglevel", "error", "-ss", position, "-i"])
                 .arg(output)
@@ -1466,12 +1477,13 @@ mod tests {
                     text: None,
                     volume_db_tenths: 0,
                     transition_in: None,
-            fade_in_us: 0,
-            fade_out_us: 0,
-            speed_milli: 1000,
-            reverse: false,
-            timeline_duration_us: 0,
-            group_id: None,
+                    fade_in_us: 0,
+                    fade_out_us: 0,
+                    speed_milli: 1000,
+                    reverse: false,
+                    timeline_duration_us: 0,
+                    group_id: None,
+                    deleted_cursor_clicks_us: Vec::new(),
                 },
                 Clip {
                     id: 2,
@@ -1483,12 +1495,13 @@ mod tests {
                     text: None,
                     volume_db_tenths: 0,
                     transition_in: None,
-            fade_in_us: 0,
-            fade_out_us: 0,
-            speed_milli: 1000,
-            reverse: false,
-            timeline_duration_us: 0,
-            group_id: None,
+                    fade_in_us: 0,
+                    fade_out_us: 0,
+                    speed_milli: 1000,
+                    reverse: false,
+                    timeline_duration_us: 0,
+                    group_id: None,
+                    deleted_cursor_clicks_us: Vec::new(),
                 },
             ],
         )];
@@ -1591,6 +1604,7 @@ mod tests {
             reverse: false,
             timeline_duration_us: 0,
             group_id: None,
+            deleted_cursor_clicks_us: Vec::new(),
         };
         let tracks = vec![
             video_track(

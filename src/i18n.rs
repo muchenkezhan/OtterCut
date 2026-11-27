@@ -67,6 +67,47 @@ pub mod key {
     pub const MATERIALS: MessageKey = MessageKey("editor.materials");
     pub const PREVIEW: MessageKey = MessageKey("editor.preview");
     pub const INSPECTOR: MessageKey = MessageKey("editor.inspector");
+
+    pub const CURSOR_EFFECT: MessageKey = MessageKey("cursor.effect");
+    pub const CURSOR_APPEARANCE: MessageKey = MessageKey("cursor.appearance");
+    pub const CURSOR_ANIMATION: MessageKey = MessageKey("cursor.animation");
+    pub const CURSOR_LOOK: MessageKey = MessageKey("cursor.look");
+    pub const CURSOR_RANGE: MessageKey = MessageKey("cursor.range");
+    pub const CURSOR_CLICK_POINT: MessageKey = MessageKey("cursor.click_point");
+    pub const CURSOR_CLICK_DELETE: MessageKey = MessageKey("cursor.click_delete");
+    pub const CURSOR_CLICK_DELETE_HINT: MessageKey = MessageKey("cursor.click_delete_hint");
+    pub const CURSOR_START: MessageKey = MessageKey("cursor.start");
+    pub const CURSOR_END: MessageKey = MessageKey("cursor.end");
+    pub const CURSOR_SIZE: MessageKey = MessageKey("cursor.size");
+    pub const CURSOR_STYLE: MessageKey = MessageKey("cursor.style");
+    pub const CURSOR_FEEDBACK: MessageKey = MessageKey("cursor.feedback");
+    pub const CURSOR_RING: MessageKey = MessageKey("cursor.ring");
+    pub const CURSOR_DOT: MessageKey = MessageKey("cursor.dot");
+    pub const CURSOR_NONE: MessageKey = MessageKey("cursor.none");
+    pub const CURSOR_ZOOM: MessageKey = MessageKey("cursor.zoom");
+    pub const CURSOR_SCALE: MessageKey = MessageKey("cursor.scale");
+    pub const CURSOR_FOLLOW: MessageKey = MessageKey("cursor.follow");
+    pub const CURSOR_FOLLOW_POINTER: MessageKey = MessageKey("cursor.follow_pointer");
+    pub const CURSOR_FOLLOW_CLICKS: MessageKey = MessageKey("cursor.follow_clicks");
+    pub const CURSOR_SMOOTHING: MessageKey = MessageKey("cursor.smoothing");
+    pub const CURSOR_PAN: MessageKey = MessageKey("cursor.pan");
+    pub const CURSOR_HOLD: MessageKey = MessageKey("cursor.hold");
+    pub const CURSOR_TRANSITION: MessageKey = MessageKey("cursor.transition");
+    pub const CURSOR_AUTO: MessageKey = MessageKey("cursor.auto");
+    pub const CURSOR_CUSTOM: MessageKey = MessageKey("cursor.custom");
+    pub const CURSOR_ZOOM_IN: MessageKey = MessageKey("cursor.zoom_in");
+    pub const CURSOR_ZOOM_OUT: MessageKey = MessageKey("cursor.zoom_out");
+    pub const CURSOR_TRANSITION_TIME: MessageKey = MessageKey("cursor.transition_time");
+    pub const CURSOR_SECONDS: MessageKey = MessageKey("cursor.seconds");
+    pub const CURSOR_NUMBER_HELP: MessageKey = MessageKey("cursor.number_help");
+    pub const CURSOR_STYLE_DEFAULT: MessageKey = MessageKey("cursor.style_default");
+    pub const CURSOR_STYLE_STUDIO_INK: MessageKey = MessageKey("cursor.style_studio_ink");
+    pub const CURSOR_STYLE_PRISM: MessageKey = MessageKey("cursor.style_prism");
+    pub const CURSOR_STYLE_CORAL: MessageKey = MessageKey("cursor.style_coral");
+    pub const CURSOR_STYLE_PIXEL: MessageKey = MessageKey("cursor.style_pixel");
+    pub const CURSOR_STYLE_STAR_SPROUT: MessageKey = MessageKey("cursor.style_star_sprout");
+    pub const CURSOR_STYLE_GLASS_LENS: MessageKey = MessageKey("cursor.style_glass_lens");
+
     pub const TIMELINE: MessageKey = MessageKey("editor.timeline");
     pub const WORKSPACE: MessageKey = MessageKey("editor.workspace");
     pub const PLAY: MessageKey = MessageKey("editor.play");
@@ -201,6 +242,45 @@ pub mod key {
         MATERIALS,
         PREVIEW,
         INSPECTOR,
+        CURSOR_EFFECT,
+        CURSOR_APPEARANCE,
+        CURSOR_ANIMATION,
+        CURSOR_LOOK,
+        CURSOR_RANGE,
+        CURSOR_CLICK_POINT,
+        CURSOR_CLICK_DELETE,
+        CURSOR_CLICK_DELETE_HINT,
+        CURSOR_START,
+        CURSOR_END,
+        CURSOR_SIZE,
+        CURSOR_STYLE,
+        CURSOR_FEEDBACK,
+        CURSOR_RING,
+        CURSOR_DOT,
+        CURSOR_NONE,
+        CURSOR_ZOOM,
+        CURSOR_SCALE,
+        CURSOR_FOLLOW,
+        CURSOR_FOLLOW_POINTER,
+        CURSOR_FOLLOW_CLICKS,
+        CURSOR_SMOOTHING,
+        CURSOR_PAN,
+        CURSOR_HOLD,
+        CURSOR_TRANSITION,
+        CURSOR_AUTO,
+        CURSOR_CUSTOM,
+        CURSOR_ZOOM_IN,
+        CURSOR_ZOOM_OUT,
+        CURSOR_TRANSITION_TIME,
+        CURSOR_SECONDS,
+        CURSOR_NUMBER_HELP,
+        CURSOR_STYLE_DEFAULT,
+        CURSOR_STYLE_STUDIO_INK,
+        CURSOR_STYLE_PRISM,
+        CURSOR_STYLE_CORAL,
+        CURSOR_STYLE_PIXEL,
+        CURSOR_STYLE_STAR_SPROUT,
+        CURSOR_STYLE_GLASS_LENS,
         TIMELINE,
         WORKSPACE,
         PLAY,
@@ -445,6 +525,45 @@ fn message_zh(key: MessageKey) -> &'static str {
         "editor.materials" => "素材",
         "editor.preview" => "预览",
         "editor.inspector" => "属性",
+        "cursor.effect" => "鼠标效果",
+        "cursor.appearance" => "光标",
+        "cursor.animation" => "动画",
+        "cursor.look" => "外观",
+        "cursor.range" => "生效范围",
+        "cursor.click_point" => "鼠标点击",
+        "cursor.click_delete" => "删除点击点",
+        "cursor.click_delete_hint" => "选中后按 Delete 删除",
+        "cursor.start" => "开始时间",
+        "cursor.end" => "结束时间",
+        "cursor.size" => "大小",
+        "cursor.style" => "光标样式",
+        "cursor.feedback" => "点击反馈",
+        "cursor.ring" => "波纹",
+        "cursor.dot" => "圆点",
+        "cursor.none" => "无",
+        "cursor.zoom" => "点击放大",
+        "cursor.scale" => "放大倍率",
+        "cursor.follow" => "镜头模式",
+        "cursor.follow_pointer" => "跟随鼠标",
+        "cursor.follow_clicks" => "点击定位",
+        "cursor.smoothing" => "跟随平滑",
+        "cursor.pan" => "平移时长",
+        "cursor.hold" => "停留时长",
+        "cursor.transition" => "过渡",
+        "cursor.auto" => "自动",
+        "cursor.custom" => "自定义",
+        "cursor.zoom_in" => "放大时长",
+        "cursor.zoom_out" => "缩回时长",
+        "cursor.transition_time" => "过渡时长",
+        "cursor.seconds" => "秒",
+        "cursor.number_help" => "单击输入数值，横向拖动微调",
+        "cursor.style_default" => "默认",
+        "cursor.style_studio_ink" => "墨黑",
+        "cursor.style_prism" => "棱镜",
+        "cursor.style_coral" => "珊瑚",
+        "cursor.style_pixel" => "像素",
+        "cursor.style_star_sprout" => "星芽",
+        "cursor.style_glass_lens" => "玻璃",
         "editor.timeline" => "时间线",
         "editor.workspace" => "工作区",
         "editor.play" => "播放",
@@ -581,6 +700,45 @@ fn message_en(key: MessageKey) -> &'static str {
         "editor.materials" => "Materials",
         "editor.preview" => "Preview",
         "editor.inspector" => "Inspector",
+        "cursor.effect" => "Mouse effects",
+        "cursor.appearance" => "Cursor",
+        "cursor.animation" => "Animation",
+        "cursor.look" => "Appearance",
+        "cursor.range" => "Active range",
+        "cursor.click_point" => "Cursor click",
+        "cursor.click_delete" => "Delete click point",
+        "cursor.click_delete_hint" => "Select and press Delete to remove",
+        "cursor.start" => "Start time",
+        "cursor.end" => "End time",
+        "cursor.size" => "Size",
+        "cursor.style" => "Cursor style",
+        "cursor.feedback" => "Click feedback",
+        "cursor.ring" => "Ring",
+        "cursor.dot" => "Dot",
+        "cursor.none" => "None",
+        "cursor.zoom" => "Click zoom",
+        "cursor.scale" => "Zoom scale",
+        "cursor.follow" => "Camera mode",
+        "cursor.follow_pointer" => "Follow cursor",
+        "cursor.follow_clicks" => "Click points",
+        "cursor.smoothing" => "Smoothing",
+        "cursor.pan" => "Pan time",
+        "cursor.hold" => "Hold time",
+        "cursor.transition" => "Transition",
+        "cursor.auto" => "Auto",
+        "cursor.custom" => "Custom",
+        "cursor.zoom_in" => "Zoom in",
+        "cursor.zoom_out" => "Zoom out",
+        "cursor.transition_time" => "Duration",
+        "cursor.seconds" => "s",
+        "cursor.number_help" => "Click to enter a value or drag sideways to adjust it",
+        "cursor.style_default" => "Default",
+        "cursor.style_studio_ink" => "Studio Ink",
+        "cursor.style_prism" => "Prism",
+        "cursor.style_coral" => "Coral",
+        "cursor.style_pixel" => "Pixel",
+        "cursor.style_star_sprout" => "Star Sprout",
+        "cursor.style_glass_lens" => "Glass Lens",
         "editor.timeline" => "Timeline",
         "editor.workspace" => "Workspace",
         "editor.play" => "Play",

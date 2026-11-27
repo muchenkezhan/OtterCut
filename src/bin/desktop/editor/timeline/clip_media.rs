@@ -468,6 +468,7 @@ mod tests {
             reverse: false,
             timeline_duration_us: 0,
             group_id: None,
+            deleted_cursor_clicks_us: Vec::new(),
         };
         let view = Viewport {
             rect: Rect::from_min_size(pos2(100.0, 0.0), vec2(420.0, 36.0)),

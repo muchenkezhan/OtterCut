@@ -36,6 +36,12 @@ pub(super) struct CursorSample {
     pub pressed: bool,
 }
 
+impl CursorSample {
+    pub(super) fn is_active_click(&self, deleted_cursor_clicks_us: &[u64]) -> bool {
+        self.pressed && deleted_cursor_clicks_us.binary_search(&self.at_us).is_err()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct CursorTelemetry {
     pub version: u32,
@@ -70,7 +76,11 @@ impl CursorTelemetry {
         }
     }
 
-    pub(super) fn sample_at(&self, at_us: u64) -> Option<CursorSample> {
+    pub(super) fn sample_at(
+        &self,
+        at_us: u64,
+        deleted_cursor_clicks_us: &[u64],
+    ) -> Option<CursorSample> {
         let index = self.samples.partition_point(|sample| sample.at_us <= at_us);
         match (
             index.checked_sub(1).and_then(|left| self.samples.get(left)),
@@ -82,11 +92,15 @@ impl CursorTelemetry {
                     at_us,
                     x: left.x + (right.x - left.x) * amount,
                     y: left.y + (right.y - left.y) * amount,
-                    pressed: left.pressed || right.pressed,
+                    pressed: left.is_active_click(deleted_cursor_clicks_us)
+                        || right.is_active_click(deleted_cursor_clicks_us),
                 })
             }
-            (Some(sample), _) => Some(CursorSample { at_us, ..*sample }),
-            (None, Some(sample)) => Some(CursorSample { at_us, ..*sample }),
+            (Some(sample), _) | (None, Some(sample)) => Some(CursorSample {
+                at_us,
+                pressed: sample.is_active_click(deleted_cursor_clicks_us),
+                ..*sample
+            }),
             (None, None) => None,
         }
     }
@@ -160,6 +174,7 @@ impl CursorZoom {
     /// marks the original region's full-zoom point, 500 ms after its region start.
     pub(super) fn new(
         telemetry: &CursorTelemetry,
+        deleted_cursor_clicks_us: &[u64],
         source: Range<u64>,
         speed_milli: u16,
         reverse: bool,
@@ -182,7 +197,7 @@ impl CursorZoom {
         for index in 0..samples.len() {
             let index = if reverse { samples.len() - 1 - index } else { index };
             let sample = samples[index];
-            if !sample.pressed
+            if !sample.is_active_click(deleted_cursor_clicks_us)
                 || ![sample.x, sample.y].iter().all(|value| (0.0..=1.0).contains(value))
             {
                 continue;
@@ -438,18 +453,6 @@ impl CursorStyle {
         Self::GlassLens,
     ];
 
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Default => "默认",
-            Self::StudioInk => "墨黑",
-            Self::Prism => "棱镜",
-            Self::Coral => "珊瑚",
-            Self::Pixel => "像素",
-            Self::StarSprout => "星芽",
-            Self::GlassLens => "玻璃",
-        }
-    }
-
     pub(super) fn sprite(self) -> Option<&'static CursorSprite> {
         static STUDIO_INK: OnceLock<CursorSprite> = OnceLock::new();
         static PRISM: OnceLock<CursorSprite> = OnceLock::new();
@@ -626,10 +629,46 @@ mod tests {
             y: 0.8,
             pressed: true,
         });
-        let sample = telemetry.sample_at(500_000).unwrap();
+        let sample = telemetry.sample_at(500_000, &[]).unwrap();
         assert!((sample.x - 0.5).abs() < 0.001);
         assert!((sample.y - 0.5).abs() < 0.001);
         assert!(sample.pressed);
+    }
+
+    #[test]
+    fn deleted_clicks_preserve_pointer_positions_and_other_click_effects() {
+        let mut telemetry = recorded_clicks(&[(1_000_000, 0.4, 0.5)]);
+        telemetry.push(CursorSample {
+            at_us: 1_040_000,
+            x: 0.6,
+            y: 0.5,
+            pressed: false,
+        });
+        telemetry.push(CursorSample {
+            at_us: 6_000_000,
+            x: 0.5,
+            y: 0.4,
+            pressed: true,
+        });
+        let deleted = [1_000_000];
+        let unedited = telemetry.sample_at(1_020_000, &[]).unwrap();
+        let edited = telemetry.sample_at(1_020_000, &deleted).unwrap();
+        assert!(unedited.pressed);
+        assert_eq!(
+            edited,
+            CursorSample {
+                pressed: false,
+                ..unedited
+            }
+        );
+        assert!(!telemetry.sample_at(0, &deleted).unwrap().pressed);
+        assert!(telemetry.sample_at(6_000_000, &deleted).unwrap().pressed);
+
+        let clip = 0..9_000_000;
+        let effect = zoom_effect(2.0, clip.end);
+        let zoom = CursorZoom::new(&telemetry, &deleted, clip.clone(), 1000, false, clip, &effect);
+        assert_eq!(zoom.at(1_000_000), None);
+        assert_eq!(zoom.at(6_000_000).unwrap().scale, 2.0);
     }
 
     #[test]
@@ -708,7 +747,7 @@ mod tests {
     fn click_zoom_eases_in_before_the_click_and_returns_to_wide() {
         let telemetry = recorded_clicks(&[(2_000_000, 0.63, 0.4)]);
         let effect = zoom_effect(1.6, 6_000_000);
-        let zoom = CursorZoom::new(&telemetry, 0..6_000_000, 1000, false, 0..6_000_000, &effect);
+        let zoom = CursorZoom::new(&telemetry, &[], 0..6_000_000, 1000, false, 0..6_000_000, &effect);
 
         assert_eq!(zoom.at(477_424), None);
         let approaching = zoom.at(1_500_000).unwrap();
@@ -734,6 +773,7 @@ mod tests {
 
         let default = CursorZoom::new(
             &single_click,
+            &[],
             0..6_000_000,
             1000,
             false,
@@ -742,6 +782,7 @@ mod tests {
         );
         let custom = CursorZoom::new(
             &single_click,
+            &[],
             0..6_000_000,
             1000,
             false,
@@ -761,6 +802,7 @@ mod tests {
         let nearby_clicks = recorded_clicks(&[(2_000_000, 0.4, 0.5), (3_500_000, 0.6, 0.5)]);
         let default_pan = CursorZoom::new(
             &nearby_clicks,
+            &[],
             0..6_000_000,
             1000,
             false,
@@ -770,6 +812,7 @@ mod tests {
         custom_effect.zoom_hold_us = default_effect.zoom_hold_us;
         let custom_pan = CursorZoom::new(
             &nearby_clicks,
+            &[],
             0..6_000_000,
             1000,
             false,
@@ -787,7 +830,7 @@ mod tests {
     fn nearby_clicks_keep_the_scale_and_pan_to_the_next_click() {
         let telemetry = recorded_clicks(&[(2_000_000, 0.4, 0.5), (3_500_000, 0.6, 0.5)]);
         let effect = zoom_effect(1.6, 6_000_000);
-        let zoom = CursorZoom::new(&telemetry, 0..6_000_000, 1000, false, 0..6_000_000, &effect);
+        let zoom = CursorZoom::new(&telemetry, &[], 0..6_000_000, 1000, false, 0..6_000_000, &effect);
 
         let first = zoom.at(2_900_000).unwrap();
         let panning = zoom.at(3_550_000).unwrap();
@@ -832,19 +875,19 @@ mod tests {
         telemetry.push(CursorSample { at_us: 2_400_000, x: 0.65, y: 0.5, pressed: false });
         let mut effect = zoom_effect(2.0, 6_000_000);
         let clip = 0..6_000_000;
-        let following = CursorZoom::new(&telemetry, clip.clone(), 1000, false, clip.clone(), &effect);
+        let following = CursorZoom::new(&telemetry, &[], clip.clone(), 1000, false, clip.clone(), &effect);
         effect.zoom_follow_cursor = false;
-        let fixed = CursorZoom::new(&telemetry, clip.clone(), 1000, false, clip, &effect);
+        let fixed = CursorZoom::new(&telemetry, &[], clip.clone(), 1000, false, clip, &effect);
         let mut spring = ZoomSpring::default();
         let mut center = 0.4;
         for time in (2_000_000..=2_400_000).step_by(20_000) {
-            let frame = following.frame(time, telemetry.sample_at(time), viewport, &mut spring, true).unwrap();
+            let frame = following.frame(time, telemetry.sample_at(time, &[]), viewport, &mut spring, true).unwrap();
             assert!(frame.center[0] >= center);
             center = frame.center[0];
         }
         assert!((0.5..0.65).contains(&center));
         let time = 2_400_000;
-        let sample = telemetry.sample_at(time);
+        let sample = telemetry.sample_at(time, &[]);
         assert_eq!(following.frame(time, sample, viewport, &mut spring, false).unwrap().center[0], 0.65);
         assert_eq!(fixed.frame(time, sample, viewport, &mut spring, false).unwrap().center[0], 0.4);
     }
@@ -859,6 +902,7 @@ mod tests {
         let effect = zoom_effect(2.0, 2_400_000);
         let zoom = CursorZoom::new(
             &telemetry,
+            &[],
             2_000_000..8_000_000,
             2000,
             true,
@@ -881,6 +925,7 @@ mod tests {
         let normal_effect = zoom_effect(1.0, 8_000_000);
         let normal = CursorZoom::new(
             &telemetry,
+            &[],
             0..8_000_000,
             1000,
             false,
@@ -891,6 +936,7 @@ mod tests {
         assert_eq!(normal.at(4_000_000), None);
         let trimmed = CursorZoom::new(
             &telemetry,
+            &[],
             5_000_000..8_000_000,
             1000,
             false,
@@ -929,6 +975,7 @@ mod tests {
             timeline_duration_us: 0,
             group_id: None,
             text: None,
+            deleted_cursor_clicks_us: Vec::new(),
         };
         assert_eq!(timeline_time_for_sample(&clip, 4_000_000), Some(6_000_000));
         assert_eq!(timeline_time_for_sample(&clip, 8_000_000), None);
@@ -952,6 +999,7 @@ mod tests {
             timeline_duration_us: 0,
             group_id: None,
             text: None,
+            deleted_cursor_clicks_us: Vec::new(),
         };
         assert_eq!(timeline_time_for_sample(&clip, 7_000_000), Some(1_999_999));
         assert_eq!(timeline_time_for_sample(&clip, 2_000_000), Some(6_999_999));

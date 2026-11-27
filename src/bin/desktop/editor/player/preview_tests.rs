@@ -11,6 +11,57 @@ use super::super::media::hidden_command;
 use super::*;
 
 #[test]
+fn deleting_a_click_refreshes_the_preview_plan_at_the_same_playhead() {
+    use crate::editor::cursor_effect::CursorSample;
+
+    let fixture = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut library = Library::new(fixture.path().to_owned(), None, &ctx);
+    let path = fixture.path().join("capture.mp4");
+    let mut telemetry = CursorTelemetry::new(640, 360);
+    let position = 200_000;
+    telemetry.push(CursorSample {
+        at_us: position,
+        x: 0.5,
+        y: 0.5,
+        pressed: true,
+    });
+    std::fs::write(
+        path.with_extension("mp4.cursor.json"),
+        serde_json::to_vec(&telemetry).unwrap(),
+    )
+    .unwrap();
+    let mut timeline = Timeline::default();
+    let clip = timeline.insert_media(path.clone(), 800_000, 0).unwrap();
+    library.add_fixture(
+        path,
+        MediaInfo {
+            duration_us: 800_000,
+            width: 640,
+            height: 360,
+            has_video: true,
+            has_audio: false,
+        },
+    );
+
+    let original = Span::at(&timeline, position).unwrap().key;
+    timeline.delete_cursor_click(clip, position).unwrap();
+    let edited = Span::at(&timeline, position).unwrap();
+    assert!(original != edited.key);
+    let cursor = edited
+        .plan(&mut library, position, false, PreviewQuality::default())
+        .unwrap()
+        .unwrap()
+        .cursor
+        .unwrap();
+    let sample = cursor
+        .telemetry
+        .sample_at(position, &cursor.deleted_cursor_clicks_us)
+        .unwrap();
+    assert!(!sample.pressed);
+}
+
+#[test]
 #[ignore = "requires local FFmpeg and FFprobe"]
 fn changing_cursor_theme_redraws_the_preview_at_the_same_playhead() {
     use crate::editor::cursor_effect::{CursorSample, CursorStyle};

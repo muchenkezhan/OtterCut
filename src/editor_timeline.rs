@@ -110,6 +110,9 @@ pub struct Clip {
     pub group_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<OverlayText>,
+    /// Sorted source timestamps of click events suppressed for this clip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_cursor_clicks_us: Vec<u64>,
 }
 
 fn is_default_volume(volume: &i16) -> bool {
@@ -149,7 +152,13 @@ impl Clip {
             timeline_duration_us: 0,
             group_id: None,
             text: None,
+            deleted_cursor_clicks_us: Vec::new(),
         }
+    }
+
+    fn sort_deleted_cursor_clicks(&mut self) {
+        self.deleted_cursor_clicks_us.sort_unstable();
+        self.deleted_cursor_clicks_us.dedup();
     }
 
     pub fn duration(&self) -> u64 {
@@ -361,6 +370,9 @@ impl Timeline {
     pub fn from_tracks(mut tracks: Vec<Track>) -> Result<Self, TimelineError> {
         for track in &mut tracks {
             track.clips.sort_unstable_by_key(|clip| clip.start);
+            for clip in &mut track.clips {
+                clip.sort_deleted_cursor_clicks();
+            }
         }
         validate(&tracks)?;
         let last_id = tracks
@@ -529,6 +541,28 @@ impl Timeline {
         let index = self.track_index(id)?;
         self.edit(|tracks, _| {
             tracks.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Suppresses one click in this video clip without modifying the source recording.
+    pub fn delete_cursor_click(&mut self, id: u64, source_us: u64) -> Result<(), TimelineError> {
+        let (track, index) = self.locate_clip(id)?;
+        let track_data = &self.tracks[track];
+        if track_data.kind != TrackKind::Video {
+            return Err(TimelineError::IncompatibleTrack);
+        }
+        let clip = &track_data.clips[index];
+        if !(clip.source_start..clip.source_end).contains(&source_us) {
+            return Err(TimelineError::InvalidSourceRange);
+        }
+        let Err(insert_at) = clip.deleted_cursor_clicks_us.binary_search(&source_us) else {
+            return Ok(());
+        };
+        self.edit_track(track, |clips, _| {
+            clips[index]
+                .deleted_cursor_clicks_us
+                .insert(insert_at, source_us);
             Ok(())
         })
     }
@@ -1007,6 +1041,7 @@ impl Timeline {
         let index = self.track_index(track)?;
         let mut pasted = clip.clone();
         pasted.start = at;
+        pasted.sort_deleted_cursor_clicks();
         self.insert_clip(index, pasted)
     }
 
@@ -1021,11 +1056,13 @@ impl Timeline {
     ) -> Result<(TrackId, u64), TimelineError> {
         self.edit_new_track(kind, before, |track, _, last_id| {
             let id = allocate_id(last_id)?;
-            track.clips.push(Clip {
+            let mut pasted = Clip {
                 id,
                 start: at,
                 ..clip.clone()
-            });
+            };
+            pasted.sort_deleted_cursor_clicks();
+            track.clips.push(pasted);
             Ok(id)
         })
     }
@@ -1244,6 +1281,7 @@ mod tests {
             timeline_duration_us: 0,
             group_id: None,
             text: None,
+            deleted_cursor_clicks_us: Vec::new(),
         }
     }
 
@@ -1254,6 +1292,34 @@ mod tests {
             clip(3, 40, 40, 60),
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn deleting_cursor_click_is_undoable_and_local_to_the_clip() {
+        let first = clip(1, 0, 10, 30);
+        let second = Clip {
+            id: 2,
+            start: first.end(),
+            ..first.clone()
+        };
+        let mut timeline = Timeline::from_clips(vec![first, second]).unwrap();
+        assert_eq!(
+            timeline.delete_cursor_click(1, 30),
+            Err(TimelineError::InvalidSourceRange)
+        );
+        assert!(!timeline.can_undo());
+
+        timeline.delete_cursor_click(1, 12).unwrap();
+        timeline.delete_cursor_click(1, 12).unwrap();
+        assert_eq!(timeline.revision(), 1);
+        assert_eq!(timeline.clips()[0].deleted_cursor_clicks_us, [12]);
+        assert!(timeline.clips()[1].deleted_cursor_clicks_us.is_empty());
+        assert!(timeline.undo());
+        assert!(timeline.clips()[0].deleted_cursor_clicks_us.is_empty());
+        assert!(timeline.redo());
+        assert_eq!(timeline.clips()[0].deleted_cursor_clicks_us, [12]);
+        timeline.delete_cursor_click(1, 11).unwrap();
+        assert_eq!(timeline.clips()[0].deleted_cursor_clicks_us, [11, 12]);
     }
 
     #[test]

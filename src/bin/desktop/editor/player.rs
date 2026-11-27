@@ -29,6 +29,7 @@ struct SpanKey {
     overlay_revision: Option<u64>,
     excluded_overlay: Option<u64>,
     cursor_effect: Option<CursorEffect>,
+    deleted_cursor_clicks_us: Vec<u64>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -130,6 +131,7 @@ impl<'a> Span<'a> {
                 overlay_revision: None,
                 excluded_overlay: None,
                 cursor_effect: None,
+                deleted_cursor_clicks_us: Vec::new(),
             },
             tracks: &[],
         }
@@ -153,6 +155,7 @@ impl<'a> Span<'a> {
             overlay_revision: None,
             excluded_overlay: None,
             cursor_effect: None,
+            deleted_cursor_clicks_us: Vec::new(),
         };
         for track in timeline.tracks() {
             if track.kind.is_overlay() {
@@ -187,6 +190,8 @@ impl<'a> Span<'a> {
             let source = Source::for_clip(clip);
             if key.video.is_none() && track.kind == TrackKind::Video {
                 key.video = Some(source.clone());
+                key.deleted_cursor_clicks_us
+                    .clone_from(&clip.deleted_cursor_clicks_us);
             }
             // Audio stream availability comes from the media probe, including the video's original sound.
             key.audio.push(source);
@@ -243,6 +248,7 @@ impl<'a> Span<'a> {
                 overlay_revision: None,
                 excluded_overlay: None,
                 cursor_effect: None,
+                deleted_cursor_clicks_us: Vec::new(),
             },
             tracks: &[],
         }
@@ -322,6 +328,7 @@ impl<'a> Span<'a> {
             let source_range = source.source_start..source.source_end;
             let zoom = CursorZoom::new(
                 &telemetry,
+                &key.deleted_cursor_clicks_us,
                 source_range.clone(),
                 source.speed_milli,
                 source.reverse,
@@ -332,6 +339,7 @@ impl<'a> Span<'a> {
             let [raster_width, raster_height] = quality.raster_size(size);
             Some(super::media::PreviewCursor {
                 telemetry,
+                deleted_cursor_clicks_us: key.deleted_cursor_clicks_us.clone(),
                 source_range,
                 viewport: super::media::cursor_viewport(
                     (raster_width as u32, raster_height as u32),
@@ -471,6 +479,7 @@ impl SpanKey {
             && self.overlay_revision == other.overlay_revision
             && self.excluded_overlay == other.excluded_overlay
             && self.cursor_effect == other.cursor_effect
+            && self.deleted_cursor_clicks_us == other.deleted_cursor_clicks_us
             && self.audio.len() == other.audio.len()
             && self
                 .audio
@@ -798,6 +807,7 @@ impl Player {
                     && active.span.end == span.key.start
                     && active.span.video == span.key.video
                     && active.span.cursor_effect == span.key.cursor_effect
+                    && active.span.deleted_cursor_clicks_us == span.key.deleted_cursor_clicks_us
                     && active.span.background == span.key.background
                     && active.span.canvas_format == span.key.canvas_format
                     && active.quality == self.quality

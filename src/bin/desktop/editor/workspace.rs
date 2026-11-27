@@ -17,10 +17,8 @@ use super::asset_info;
 use super::background::{BackgroundSettings, BackgroundSource};
 use super::background_panel;
 use super::canvas_format::CanvasFormat;
-use super::cursor_effect::{
-    CursorClickEffect, CursorEffect, CursorStyle, CursorTelemetry, ZOOM_HOLD_RANGE, ZOOM_PAN_RANGE,
-    ZOOM_SCALE_RANGE, ZOOM_TRANSITION_RANGE, timeline_time_for_sample,
-};
+use super::cursor_effect::{CursorEffect, CursorTelemetry, timeline_time_for_sample};
+use super::cursor_inspector;
 use super::dock_model::{DockState, Pane};
 use super::export::{ExportJob, ExportQuality, ExportResolution, ExportSettings};
 use super::feature_panel::{self, FeatureTab};
@@ -37,7 +35,7 @@ use super::speech::{SpeechCue, SpeechJob};
 use super::subtitle_canvas::SubtitleCanvas;
 use super::text_panel::TextInspector;
 use super::thumbnails::Thumbnails;
-use super::timeline_view::{CursorTrackData, TimelineView, TrackDestination};
+use super::timeline_view::{CursorClickMarker, CursorTrackData, TimelineView, TrackDestination};
 use super::transition_panel;
 #[cfg(windows)]
 use super::window_frame;
@@ -1434,9 +1432,14 @@ impl Workspace {
             Pane::Materials => self.feature_panel(ui),
             Pane::Preview => self.preview(ui),
             Pane::Inspector => {
-                egui::ScrollArea::vertical()
-                    .id_salt("inspector-scroll")
-                    .show(ui, |ui| self.inspector(ui));
+                if self.timeline_view.cursor_track_selected() && self.cursor_telemetry_available() {
+                    let duration = self.duration().max(1);
+                    cursor_inspector::show(ui, &mut self.cursor_effect, duration);
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("inspector-scroll")
+                        .show(ui, |ui| self.inspector(ui));
+                }
             }
             Pane::Timeline => self.timeline(ui),
         });
@@ -1765,10 +1768,6 @@ impl Workspace {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        if self.timeline_view.cursor_track_selected() && self.cursor_telemetry_available() {
-            self.cursor_effect_inspector(ui);
-            ui.separator();
-        }
         if self.overlay_inspector(ui) {
             return;
         }
@@ -1908,244 +1907,6 @@ impl Workspace {
             .any(|clip| {
                 PathBuf::from(format!("{}.cursor.json", clip.path.display())).is_file()
             })
-    }
-
-    fn cursor_effect_inspector(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("鼠标轨道")
-            .default_open(true)
-            .show(ui, |ui| {
-                let duration = self.duration().max(1);
-                ui.label("拖动时间线中的鼠标效果块可移动，拖两端可调整范围。");
-                ui.add(
-                    egui::Slider::new(&mut self.cursor_effect.start_us, 0..=duration)
-                        .text("开始"),
-                );
-                self.cursor_effect.start_us = self.cursor_effect.start_us.min(duration - 1);
-                ui.add(
-                    egui::Slider::new(
-                        &mut self.cursor_effect.end_us,
-                        (self.cursor_effect.start_us + 1)..=duration,
-                    )
-                    .text("结束"),
-                );
-                ui.checkbox(&mut self.cursor_effect.enabled, "显示鼠标");
-                self.cursor_zoom_inspector(ui);
-                ui.label("光标样式");
-                let palette = ui_theme::palette(ui.ctx());
-                let preview_key = egui::Id::new("cursor-style-theme-previews");
-                let preview_textures = ui
-                    .data(|data| data.get_temp::<Vec<(CursorStyle, egui::TextureHandle)>>(preview_key))
-                    .unwrap_or_else(|| {
-                        let textures = CursorStyle::ALL
-                            .into_iter()
-                            .filter_map(|style| {
-                                let sprite = style.sprite()?;
-                                let image = egui::ColorImage::from_rgba_unmultiplied(
-                                    [sprite.width as usize, sprite.height as usize],
-                                    &sprite.rgba,
-                                );
-                                let filter = if style == CursorStyle::Pixel {
-                                    egui::TextureOptions::NEAREST
-                                } else {
-                                    egui::TextureOptions::LINEAR
-                                };
-                                Some((
-                                    style,
-                                    ui.ctx().load_texture(
-                                        format!("cursor-style-{}", style.label()),
-                                        image,
-                                        filter,
-                                    ),
-                                ))
-                            })
-                            .collect::<Vec<_>>();
-                        ui.data_mut(|data| data.insert_temp(preview_key, textures.clone()));
-                        textures
-                    });
-                ui.horizontal_wrapped(|ui| {
-                    for style in CursorStyle::ALL {
-                        let selected = self.cursor_effect.cursor_style == style;
-                        let (rect, response) =
-                            ui.allocate_exact_size(vec2(62.0, 48.0), egui::Sense::click());
-                        let tile_fill = if selected {
-                            palette.control.gamma_multiply(0.9)
-                        } else if response.hovered() || response.has_focus() {
-                            palette.hover
-                        } else {
-                            palette.surface
-                        };
-                        ui.painter().rect_filled(rect, 5.0, tile_fill);
-                        ui.painter().rect_stroke(
-                            rect,
-                            5.0,
-                            egui::Stroke::new(
-                                if selected { 1.5_f32 } else { 1.0_f32 },
-                                if selected { palette.accent } else { palette.border },
-                            ),
-                            egui::StrokeKind::Inside,
-                        );
-
-                        let preview_rect = egui::Rect::from_center_size(
-                            rect.center_top() + vec2(0.0, 20.0),
-                            vec2(34.0, 34.0),
-                        );
-                        if let Some((_, texture)) = preview_textures
-                            .iter()
-                            .find(|(candidate, _)| *candidate == style)
-                        {
-                            ui.painter().image(
-                                texture.id(),
-                                preview_rect,
-                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
-                        } else {
-                            Icon::Cursor.paint_scaled(
-                                ui.painter(),
-                                preview_rect.center(),
-                                palette.text,
-                                1.2,
-                            );
-                        }
-                        ui.painter().text(
-                            rect.center_bottom() - vec2(0.0, 6.0),
-                            egui::Align2::CENTER_CENTER,
-                            style.label(),
-                            egui::FontId::proportional(9.5),
-                            if selected { palette.accent } else { palette.text },
-                        );
-                        response.widget_info(|| {
-                            egui::WidgetInfo::selected(
-                                egui::WidgetType::Button,
-                                response.enabled(),
-                                selected,
-                                style.label(),
-                            )
-                        });
-                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            self.cursor_effect.cursor_style = style;
-                        }
-                    }
-                });
-                ui.add(
-                    egui::Slider::new(&mut self.cursor_effect.cursor_scale, 0.5..=4.0)
-                        .text("鼠标大小"),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("点击反馈");
-                    for (effect, label) in [
-                        (CursorClickEffect::Ring, "波纹"),
-                        (CursorClickEffect::Dot, "圆点"),
-                        (CursorClickEffect::None, "无"),
-                    ] {
-                        if ui
-                            .selectable_label(self.cursor_effect.click_effect == effect, label)
-                            .clicked()
-                        {
-                            self.cursor_effect.click_effect = effect;
-                        }
-                    }
-                });
-            });
-    }
-
-    fn cursor_zoom_inspector(&mut self, ui: &mut egui::Ui) {
-        let effect = &mut self.cursor_effect;
-        let reset_transition = ui
-            .horizontal_wrapped(|ui| {
-                ui.strong("点击放大");
-                ui.selectable_label(effect.zoom_transition_us.is_none(), "自动过渡")
-                    .on_hover_text("OpenScreen 的默认过渡，放大 1.52 秒，回退 1.02 秒")
-                    .clicked()
-            })
-            .inner;
-        let mut transition_us = effect.zoom_transition_us();
-        let original_transition_us = transition_us;
-        ui.checkbox(&mut effect.zoom_follow_cursor, "镜头跟随鼠标")
-            .on_hover_text("放大时随录制的鼠标移动。关闭后按点击位置平移");
-
-        egui::Grid::new("cursor-zoom-settings")
-            .num_columns(2)
-            .min_col_width(0.0)
-            .min_row_height(20.0)
-            .spacing(vec2(6.0, 3.0))
-            .show(ui, |ui| {
-                ui.spacing_mut().interact_size.y = 20.0;
-                let label = ui.label("倍率");
-                ui.add(
-                    egui::DragValue::new(&mut effect.zoom_scale)
-                        .range(ZOOM_SCALE_RANGE)
-                        .speed(0.01)
-                        .fixed_decimals(2)
-                        .suffix("×"),
-                )
-                .labelled_by(label.id)
-                .on_hover_text("设为 1 倍可关闭点击放大");
-                ui.end_row();
-
-                for (label, help, duration_us, range_us, enabled) in [
-                    (
-                        "过渡",
-                        "自动时显示回退时长。手动修改后，放大和回退共用这个时长",
-                        &mut transition_us,
-                        ZOOM_TRANSITION_RANGE,
-                        true,
-                    ),
-                    (
-                        "停留",
-                        "放大后保持的时长",
-                        &mut effect.zoom_hold_us,
-                        ZOOM_HOLD_RANGE,
-                        true,
-                    ),
-                    (
-                        "平移",
-                        "关闭镜头跟随时，在连续点击位置之间平移的时长",
-                        &mut effect.zoom_pan_us,
-                        ZOOM_PAN_RANGE,
-                        !effect.zoom_follow_cursor,
-                    ),
-                ] {
-                    let label = ui.label(label).on_hover_text(help);
-                    const US_PER_SECOND: f64 = 1_000_000.0;
-                    let mut seconds = *duration_us as f64 / US_PER_SECOND;
-                    let range_seconds = (*range_us.start() as f64 / US_PER_SECOND)
-                        ..=(*range_us.end() as f64 / US_PER_SECOND);
-                    if ui
-                        .add_enabled(
-                            enabled,
-                            egui::DragValue::new(&mut seconds)
-                                .range(range_seconds)
-                                .speed(0.01)
-                                .fixed_decimals(2)
-                                .suffix(" 秒"),
-                        )
-                        .labelled_by(label.id)
-                        .on_hover_text(help)
-                        .changed()
-                    {
-                        *duration_us = (seconds * US_PER_SECOND).round() as u64;
-                    }
-                    ui.end_row();
-                }
-                let label = ui.label("跟随平滑");
-                ui.add_enabled(
-                    effect.zoom_follow_cursor,
-                    egui::DragValue::new(&mut effect.smoothing)
-                        .range(0.0..=1.0)
-                        .speed(0.01)
-                        .fixed_decimals(2),
-                )
-                .labelled_by(label.id)
-                .on_hover_text("调低时镜头更快追上鼠标，调高时镜头移动更平缓");
-                ui.end_row();
-            });
-
-        if reset_transition {
-            effect.zoom_transition_us = None;
-        } else if transition_us != original_transition_us {
-            effect.zoom_transition_us = Some(transition_us);
-        }
     }
 
     fn home_screen(&mut self, ui: &mut egui::Ui) {
@@ -2707,10 +2468,15 @@ fn cursor_tracks<'a>(timeline: &Timeline, cache: &'a mut CursorMarkerCache) -> &
             let mut markers = telemetry
                 .samples
                 .iter()
-                .filter(|sample| sample.pressed)
-                .filter_map(|sample| timeline_time_for_sample(clip, sample.at_us))
+                .filter(|sample| sample.is_active_click(&clip.deleted_cursor_clicks_us))
+                .filter_map(|sample| {
+                    Some(CursorClickMarker {
+                        timeline_us: timeline_time_for_sample(clip, sample.at_us)?,
+                        source_us: sample.at_us,
+                    })
+                })
                 .collect::<Vec<_>>();
-            markers.sort_unstable();
+            markers.sort_unstable_by_key(|marker| (marker.timeline_us, marker.source_us));
             markers.dedup();
             cursor_tracks.push(CursorTrackData {
                 clip_id: clip.id,
@@ -2742,6 +2508,7 @@ fn cursor_marker_cache_key(timeline: &Timeline) -> u64 {
             clip.speed_milli.hash(&mut hasher);
             clip.reverse.hash(&mut hasher);
             clip.timeline_duration_us.hash(&mut hasher);
+            clip.deleted_cursor_clicks_us.hash(&mut hasher);
             let path = PathBuf::from(format!("{}.cursor.json", clip.path.display()));
             match fs::metadata(path) {
                 Ok(metadata) => {

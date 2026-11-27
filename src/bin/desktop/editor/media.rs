@@ -811,6 +811,7 @@ pub(super) struct PreviewPlan {
 
 pub(super) struct PreviewCursor {
     pub telemetry: CursorTelemetry,
+    pub deleted_cursor_clicks_us: Vec<u64>,
     pub source_range: std::ops::Range<u64>,
     pub viewport: CursorViewport,
     pub zoom: CursorZoom,
@@ -1622,7 +1623,9 @@ impl VideoDecode {
                             .saturating_add(source_elapsed)
                             .min(cursor.source_range.end - 1)
                     };
-                    let sample = cursor.telemetry.sample_at(source_time);
+                    let sample = cursor
+                        .telemetry
+                        .sample_at(source_time, &cursor.deleted_cursor_clicks_us);
                     let zoom = cursor.zoom.frame(offset, sample, cursor.viewport, &mut zoom_spring, playing);
                     apply_cursor_effect(
                         &mut pixels,
