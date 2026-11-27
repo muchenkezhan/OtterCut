@@ -1911,7 +1911,6 @@ impl Workspace {
 
     fn home_screen(&mut self, ui: &mut egui::Ui) {
         let colors = ui_theme::palette(ui.ctx());
-        let projects = self.home_projects();
         let area = ui.available_rect_before_wrap();
         let content_width = (area.width() - 32.0).clamp(0.0, 1120.0);
         let content_rect = egui::Rect::from_center_size(area.center(), vec2(content_width, area.height()));
@@ -1929,7 +1928,14 @@ impl Workspace {
             egui::Color32::from_rgb(34, 48, 72).gamma_multiply(0.22),
         );
         let mut content = ui.new_child(egui::UiBuilder::new().max_rect(content_rect));
+        egui::ScrollArea::vertical()
+            .id_salt("editor-home")
+            .auto_shrink([false, false])
+            .show(&mut content, |ui| self.home_content(ui, colors));
+    }
 
+    fn home_content(&mut self, content: &mut egui::Ui, colors: ui_theme::Palette) {
+        let projects = self.home_projects();
         content.add_space(18.0);
         content.horizontal(|ui| {
             ui.add(
@@ -1947,7 +1953,7 @@ impl Workspace {
             });
         });
 
-        content.add_space(40.0);
+        content.add_space(18.0);
         let hero_width = content.available_width();
         let (hero, _) = content.allocate_exact_size(vec2(hero_width, 270.0), egui::Sense::hover());
         let mut hero_ui = content.new_child(egui::UiBuilder::new().max_rect(hero));
@@ -2041,17 +2047,14 @@ impl Workspace {
                         );
                 });
 
-        content.add_space(32.0);
-        content.horizontal(|ui| {
-            ui.label(RichText::new("最近打开").size(17.0).strong().color(colors.text));
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!("{} 个工程", projects.len()))
-                    .size(11.0)
-                    .color(colors.muted),
-            );
-        });
-        content.add_space(14.0);
+        content.add_space(16.0);
+        content.label(
+            RichText::new("本地项目")
+                .size(17.0)
+                .strong()
+                .color(colors.text),
+        );
+        content.add_space(8.0);
 
         if projects.is_empty() {
             egui::Frame::new()
@@ -2059,7 +2062,7 @@ impl Workspace {
                 .corner_radius(14.0)
                 .stroke(egui::Stroke::new(1.0, colors.border))
                 .inner_margin(24.0)
-                .show(&mut content, |ui| {
+                .show(content, |ui| {
                     ui.allocate_ui_with_layout(
                         vec2(ui.available_width(), 120.0),
                         Layout::left_to_right(Align::Center),
@@ -2076,81 +2079,104 @@ impl Workspace {
                             });
                         });
                 });
-        } else {
-            egui::ScrollArea::horizontal()
-                .id_salt("home-recent-projects")
-                .show(&mut content, |ui| {
-                    ui.horizontal(|ui| {
-                        for (path, modified) in &projects {
-                            let thumbnail = self
-                                .project_thumbnail_source(path)
-                                .and_then(|source| self.thumbnails.texture(&source).cloned());
-                            let mut open_card = false;
-                            let card = ui.allocate_ui([238.0, 164.0].into(), |ui| {
-                                egui::Frame::new()
-                                    .fill(colors.surface)
-                                    .corner_radius(14.0)
-                                    .stroke(egui::Stroke::new(1.0, colors.border))
-                                    .inner_margin(12.0)
-                                    .show(ui, |ui| {
-                                        if let Some(thumbnail) = &thumbnail {
-                                            ui.add(
-                                                egui::Image::new(thumbnail)
-                                                    .fit_to_exact_size(vec2(212.0, 92.0))
-                                                    .corner_radius(9.0),
-                                            );
-                                        } else {
-                                            let placeholder = ui.allocate_exact_size(
-                                                vec2(212.0, 92.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                placeholder.0,
-                                                9.0,
-                                                colors.control,
-                                            );
-                                            ui.painter().text(
-                                                placeholder.0.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "暂无预览",
-                                                egui::FontId::proportional(11.0),
-                                                colors.muted,
-                                            );
-                                        }
-                                        ui.add_space(8.0);
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                RichText::new(filename(path))
-                                                    .size(13.0)
-                                                    .strong()
-                                                    .color(colors.text),
-                                            );
-                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                                ui.label(
-                                                    RichText::new("→").size(15.0).color(colors.accent),
-                                                );
-                                            });
-                                        });
-                                        ui.add_space(3.0);
-                                        ui.label(
-                                            RichText::new(format_modified(*modified))
-                                                .size(11.0)
-                                                .color(colors.muted),
-                                        );
-                                    });
-                            });
-                            if card.response.clicked() {
-                                open_card = true;
-                            }
-                            if open_card {
-                                self.open_project_path(ui.ctx(), path.clone());
-                            }
-                            ui.add_space(10.0);
-                        }
-                    });
-                });
+            return;
+        }
+
+        const CARD_WIDTH: f32 = 148.0;
+        const CARD_GAP: f32 = 10.0;
+        let width = content.available_width();
+        let columns = (((width + CARD_GAP) / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1);
+        let card_width = (width + CARD_GAP) / columns as f32 - CARD_GAP;
+        for (index, row) in projects.chunks(columns).enumerate() {
+            if index > 0 {
+                content.add_space(6.0);
+            }
+            let clicked = content
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = CARD_GAP;
+                    row.iter().find_map(|(path, modified)| {
+                        self.project_card(ui, path, *modified, card_width, colors)
+                            .then_some(path)
+                    })
+                })
+                .inner;
+            if let Some(path) = clicked {
+                self.open_project_path(content.ctx(), path.clone());
+                break;
+            }
         }
     }
+
+    fn project_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &Path,
+        modified: SystemTime,
+        width: f32,
+        colors: ui_theme::Palette,
+    ) -> bool {
+        let (_, rect) = ui.allocate_space(vec2(width, 116.0));
+        let response = ui.interact(rect, ui.id().with(path), egui::Sense::click());
+        let title = path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy();
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &*title));
+        if response.gained_focus() {
+            response.scroll_to_me(None);
+        }
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            let (fill, outline) = if response.hovered() || response.has_focus() {
+                (colors.hover, colors.accent)
+            } else {
+                (colors.surface, colors.border)
+            };
+            painter.rect_filled(rect, 10.0, fill);
+            let preview = egui::Rect::from_min_max(
+                rect.min + vec2(5.0, 5.0),
+                egui::pos2(rect.right() - 5.0, rect.top() + 73.0),
+            );
+            painter.rect_filled(preview, 6.0, colors.monitor);
+            if let Some(thumbnail) = self
+                .project_thumbnail_source(path)
+                .and_then(|source| self.thumbnails.texture(&source))
+            {
+                let size = thumbnail.size_vec2();
+                let scale = (preview.width() / size.x).min(preview.height() / size.y);
+                egui::Image::new(thumbnail).corner_radius(6.0).paint_at(
+                    ui,
+                    egui::Rect::from_center_size(preview.center(), size * scale),
+                );
+            } else {
+                Icon::Editor.paint(painter, preview.center(), colors.muted);
+            }
+
+            let mut label = egui::text::LayoutJob::simple(
+                title.to_string(),
+                egui::FontId::proportional(13.0),
+                colors.text,
+                (rect.width() - 18.0).max(1.0),
+            );
+            label.wrap.max_rows = 1;
+            painter.galley(rect.min + vec2(9.0, 79.0), painter.layout_job(label), colors.text);
+            painter.text(
+                rect.min + vec2(9.0, 98.0),
+                egui::Align2::LEFT_TOP,
+                format_modified(modified),
+                egui::FontId::proportional(10.5),
+                colors.muted,
+            );
+            painter.rect_stroke(
+                rect,
+                10.0,
+                egui::Stroke::new(1.0_f32, outline),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(title)
+            .clicked()
+    }
+
     fn gradient_action_button(
         ui: &mut egui::Ui,
         size: egui::Vec2,
